@@ -114,3 +114,18 @@ This project has been specifically optimized for Alpine Linux and MUSL libc comp
 
 ### Testing on Alpine
 All 60+ tests pass on Alpine Linux environments. The implementation avoids glibc-specific features and uses portable Rust standard library functions wherever possible.
+
+## Development Guidelines
+
+- When adding a new feature or change, compare the new feature or change in Rust with the current C++ implementation found under `docs/mergerfs-original`
+
+## Test Development Workflow
+- After implementing a new feature, update the Python based tests for new functionality with positive and negative tests and run.
+
+## Safety Guidelines
+
+- Never use unsafe Rust code
+
+## Compatibility Constraints
+
+- Never use glibc/libc. Want to maintain compatibility with MUSL (e.g., Alpine Linux)

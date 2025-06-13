@@ -6,7 +6,7 @@ This directory contains a comprehensive Python-based testing framework for merge
 
 The testing framework includes:
 
-- **Policy Behavior Tests**: Verify that different create policies (FirstFound, MostFreeSpace, LeastFreeSpace) work correctly
+- **Policy Behavior Tests**: Verify that different create policies (FirstFound, MostFreeSpace, LeastFreeSpace, Random) work correctly
 - **Property-based Tests**: Use Hypothesis to generate random operations and verify invariants hold
 - **Concurrent Access Tests**: Test filesystem behavior under concurrent operations
 - **Fuzz Testing Foundation**: Framework for fuzz testing with random operations and invariant checking
@@ -14,10 +14,16 @@ The testing framework includes:
 
 ## Quick Start
 
-1. **Install dependencies**:
+1. **Install dependencies** (using uv):
    ```bash
    cd python_tests
-   pip install -r requirements.txt
+   uv sync
+   ```
+
+   Or if you don't have uv installed:
+   ```bash
+   pip install uv
+   uv sync
    ```
 
 2. **Run a quick verification test**:
@@ -38,12 +44,14 @@ python_tests/
 │   └── fuse_manager.py      # FUSE process management
 ├── tests/
 │   ├── test_policy_behavior.py      # Policy behavior tests  
+│   ├── test_random_policy.py        # Random policy specific tests
 │   ├── test_property_based.py       # Property-based tests with Hypothesis
 │   ├── test_concurrent_access.py    # Concurrent access tests
 │   └── test_fuzz_foundation.py      # Fuzz testing framework
 ├── conftest.py              # Pytest configuration and fixtures
 ├── pytest.ini              # Pytest settings
-├── requirements.txt         # Python dependencies  
+├── pyproject.toml          # Python project configuration (uv)
+├── uv.lock                 # Locked dependencies
 ├── run_tests.py            # Test runner script
 └── README.md               # This file
 ```

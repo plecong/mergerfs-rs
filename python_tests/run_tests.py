@@ -59,7 +59,14 @@ def ensure_binary_exists() -> bool:
 
 def run_pytest(args: list) -> int:
     """Run pytest with the given arguments."""
-    pytest_cmd = ["python", "-m", "pytest"] + args
+    # Try to use uv if available, fall back to python
+    try:
+        # Check if uv is available
+        subprocess.run(["uv", "--version"], capture_output=True, check=True)
+        pytest_cmd = ["uv", "run", "pytest"] + args
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Fall back to regular python
+        pytest_cmd = ["python3", "-m", "pytest"] + args
     
     print(f"Running: {' '.join(pytest_cmd)}")
     result = subprocess.run(pytest_cmd)
@@ -77,7 +84,7 @@ def main():
     )
     parser.add_argument(
         "--policy",
-        choices=["ff", "mfs", "lfs"],
+        choices=["ff", "mfs", "lfs", "rand"],
         help="Test specific policy only"
     )
     parser.add_argument(

@@ -20,4 +20,5 @@ pub use create::{
     FirstFoundCreatePolicy,
     LeastFreeSpaceCreatePolicy,
     MostFreeSpaceCreatePolicy,
+    RandomCreatePolicy,
 };

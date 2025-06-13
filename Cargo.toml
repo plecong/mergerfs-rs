@@ -13,6 +13,7 @@ tracing-subscriber = "0.3"
 time = { version = "0.3", features = ["macros"] }
 # Use filetime for portable timestamp operations
 filetime = "0.2"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3.0"

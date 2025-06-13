@@ -14,7 +14,7 @@ use std::sync::Arc;
 use branch::{Branch, BranchMode};
 use file_ops::FileManager;
 use fuse_fs::MergerFS;
-use policy::{FirstFoundCreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy, CreatePolicy};
+use policy::{FirstFoundCreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy, RandomCreatePolicy, CreatePolicy};
 
 fn parse_args(args: &[String]) -> (String, PathBuf, Vec<PathBuf>) {
     let mut create_policy = "ff".to_string();
@@ -110,6 +110,7 @@ fn main() {
     let (policy_name, policy): (&str, Box<dyn CreatePolicy>) = match create_policy.as_str() {
         "mfs" => ("MostFreeSpace", Box::new(MostFreeSpaceCreatePolicy::new())),
         "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy::new())),
+        "rand" => ("Random", Box::new(RandomCreatePolicy::new())),
         _ => ("FirstFound", Box::new(FirstFoundCreatePolicy::new())),
     };
     
@@ -119,6 +120,7 @@ fn main() {
     println!("Policy: {} ({})", policy_name, match create_policy.as_str() {
         "mfs" => "files created in branch with most free space",
         "lfs" => "files created in branch with least free space",
+        "rand" => "files created in random writable branch",
         _ => "files created in first writable branch",
     });
     println!("Mounting filesystem...");

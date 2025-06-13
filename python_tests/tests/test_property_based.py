@@ -3,6 +3,35 @@ Property-based tests for mergerfs-rs using Hypothesis.
 
 These tests generate random filesystem operations and verify that 
 policy invariants hold true across all scenarios.
+
+## Key Invariants Tested:
+
+1. **Policy Consistency**: Files created with a specific policy should always
+   follow that policy's rules regardless of the order of operations.
+
+2. **Single Branch Placement**: Each file should exist in exactly one branch
+   after creation (no duplication).
+
+3. **File Accessibility**: All files should remain accessible through the
+   mountpoint regardless of which branch they're stored in.
+
+4. **Content Preservation**: File contents should be preserved exactly as
+   written, regardless of the storage branch.
+
+5. **Policy-Specific Invariants**:
+   - FirstFound (ff): Always uses the first writable branch
+   - MostFreeSpace (mfs): Always selects the branch with most available space
+   - LeastFreeSpace (lfs): Always selects the branch with least available space
+   - Random (rand): Distributes files across branches randomly
+
+6. **Directory Consistency**: Directories should follow the same policy rules
+   as files and maintain proper parent-child relationships.
+
+7. **Union Behavior**: Files should appear unified regardless of their actual
+   storage location, with proper precedence rules applied.
+
+8. **Error Handling**: Invalid operations should fail gracefully with
+   appropriate error codes.
 """
 
 import pytest
@@ -25,7 +54,7 @@ valid_filename = st.text(
 
 file_content = st.text(min_size=0, max_size=1000)
 
-policy_strategy = st.sampled_from(["ff", "mfs", "lfs"])
+policy_strategy = st.sampled_from(["ff", "mfs", "lfs", "rand"])
 
 file_sizes = st.integers(min_value=100, max_value=10000)
 
@@ -75,6 +104,9 @@ class TestPolicyProperties:
                 if policy == "ff":
                     # FirstFound should always use the first writable branch
                     assert locations[0] == 0, f"FirstFound policy should use first branch, but used {locations[0]}"
+                elif policy == "rand":
+                    # Random policy should use one of the available branches
+                    assert locations[0] in range(len(branches)), f"Random policy should use a valid branch"
                 
             # Verify all files are accessible
             for filename in created_files:
@@ -180,7 +212,33 @@ class TestPolicyProperties:
 
 
 class PolicyStateMachine(RuleBasedStateMachine):
-    """Stateful property-based testing for policy behavior."""
+    """Stateful property-based testing for policy behavior.
+    
+    This state machine tests the following invariants across sequences of operations:
+    
+    1. **State Consistency**: The filesystem state should remain consistent
+       regardless of the order of operations performed.
+    
+    2. **Policy Adherence**: Every file/directory creation should follow the
+       active policy's rules at the time of creation.
+    
+    3. **No File Duplication**: Files should never be duplicated across branches
+       during normal operations.
+    
+    4. **Hierarchical Consistency**: Parent directories and their children should
+       maintain proper relationships regardless of creation order.
+    
+    5. **Cumulative State**: The set of accessible files should always equal
+       the set of successfully created files minus successfully deleted files.
+    
+    The state machine generates random sequences of:
+    - File creation
+    - Directory creation
+    - File/directory deletion
+    - Policy switching (future enhancement)
+    
+    And verifies invariants hold after each operation.
+    """
     
     def __init__(self):
         super().__init__()

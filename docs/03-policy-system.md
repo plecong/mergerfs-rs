@@ -317,6 +317,13 @@ namespace rand {
 }
 ```
 
+**Implementation Details:**
+- Uses a two-stage approach: first finds all eligible branches, then randomly selects one
+- Ensures uniform distribution across all valid branches
+- The `shrink_to_rand_elem` function uses a thread-local Mersenne Twister for high-quality randomness
+- Reuses the error accumulation logic from the `all` policy
+- See [Random Policy C++ Implementation Details](policies/create/random-cpp-implementation.md) for comprehensive analysis
+
 ## Path Preservation
 
 ### Concept
@@ -398,6 +405,13 @@ struct Functions {
 2. `EROFS` (Read-only filesystem) - overrides ENOENT
 3. `ENOSPC` (No space left) - overrides ENOENT
 4. `ENOENT` (No such file/directory) - default/lowest priority
+
+**Note:** The original C++ implementation actually uses a different priority order in `policy_error.hpp`:
+1. `EROFS` (Read-only filesystem) - highest priority
+2. `ENOSPC` (No space left) - medium priority
+3. `ENOENT` (No such file/directory) - lowest priority
+
+This simplified system ensures that more specific/actionable errors take precedence over generic "not found" errors.
 
 ### Policy Failure Handling
 ```cpp

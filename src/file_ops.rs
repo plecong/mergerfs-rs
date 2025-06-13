@@ -20,8 +20,11 @@ impl FileManager {
     }
 
     pub fn create_file(&self, path: &Path, content: &[u8]) -> Result<(), PolicyError> {
+        // Select branch for new file using create policy
         let branch = self.create_policy.select_branch(&self.branches, path)?;
         let full_path = branch.full_path(path);
+        
+        tracing::info!("Creating new file {:?} in branch {:?}", path, branch.path);
         
         // Create parent directories if needed
         if let Some(parent) = full_path.parent() {
@@ -30,7 +33,65 @@ impl FileManager {
         
         let mut file = File::create(full_path)?;
         file.write_all(content)?;
+        file.sync_all()?; // Ensure data is written to disk
         Ok(())
+    }
+    
+    pub fn write_to_file(&self, path: &Path, offset: u64, data: &[u8]) -> Result<usize, PolicyError> {
+        // For writing to existing files at offset, find first existing instance
+        // In a full implementation, this would be determined at open() time
+        for branch in &self.branches {
+            if !branch.allows_create() {
+                continue; // Skip read-only branches
+            }
+            
+            let full_path = branch.full_path(path);
+            if full_path.exists() && full_path.is_file() {
+                tracing::info!("Writing {} bytes at offset {} to {:?} in branch {:?}", 
+                    data.len(), offset, path, branch.path);
+                
+                use std::fs::OpenOptions;
+                use std::io::Seek;
+                use std::io::SeekFrom;
+                
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .open(full_path)?;
+                
+                file.seek(SeekFrom::Start(offset))?;
+                let written = file.write(data)?;
+                file.sync_all()?;
+                return Ok(written);
+            }
+        }
+        
+        // If file doesn't exist in any branch, this is an error
+        // Files should be created with create(), not write()
+        Err(PolicyError::NoBranchesAvailable)
+    }
+    
+    pub fn truncate_file(&self, path: &Path, size: u64) -> Result<(), PolicyError> {
+        // For truncating existing files, find first existing instance
+        for branch in &self.branches {
+            if !branch.allows_create() {
+                continue; // Skip read-only branches
+            }
+            
+            let full_path = branch.full_path(path);
+            if full_path.exists() && full_path.is_file() {
+                tracing::info!("Truncating file {:?} to size {} in branch {:?}", path, size, branch.path);
+                
+                use std::fs::OpenOptions;
+                let file = OpenOptions::new()
+                    .write(true)
+                    .open(full_path)?;
+                file.set_len(size)?;
+                return Ok(());
+            }
+        }
+        
+        // If file doesn't exist, this is an error
+        Err(PolicyError::NoBranchesAvailable)
     }
 
     pub fn read_file(&self, path: &Path) -> Result<Vec<u8>, PolicyError> {

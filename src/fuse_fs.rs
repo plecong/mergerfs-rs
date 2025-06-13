@@ -12,6 +12,7 @@ const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 const ENOTEMPTY: i32 = 39;
 const EACCES: i32 = 13;
+const EROFS: i32 = 30;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -194,8 +195,8 @@ impl Filesystem for MergerFS {
         }
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
-        debug!("open: ino={}", ino);
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        info!("open: ino={}, flags={}", ino, flags);
 
         match self.get_inode_data(ino) {
             Some(data) => {
@@ -379,7 +380,8 @@ impl Filesystem for MergerFS {
             }
             Err(e) => {
                 error!("Failed to create file: {:?}", e);
-                reply.error(EIO);
+                let errno = e.errno();
+                reply.error(errno);
             }
         }
     }
@@ -396,7 +398,7 @@ impl Filesystem for MergerFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        debug!("write: ino={}, offset={}, len={}", ino, offset, data.len());
+        info!("write: ino={}, offset={}, len={}", ino, offset, data.len());
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -408,19 +410,25 @@ impl Filesystem for MergerFS {
 
         let path = Path::new(&inode_data.path);
         
-        // For simplicity, we only support writing at offset 0 (overwrite)
-        if offset != 0 {
-            reply.error(EINVAL);
-            return;
-        }
+        // Write to the file at the specified offset
+        let result = self.file_manager.write_to_file(path, offset as u64, data)
+            .map(|_| ());
 
-        match self.file_manager.create_file(path, data) {
+        match result {
             Ok(_) => {
                 // Update file size in inode
                 let mut inodes = self.inodes.write();
                 if let Some(inode_data) = inodes.get_mut(&ino) {
-                    inode_data.attr.size = data.len() as u64;
-                    inode_data.attr.blocks = (data.len() as u64 + 511) / 512;
+                    // Calculate new size
+                    let new_size = if offset == 0 && data.len() > 0 {
+                        data.len() as u64
+                    } else {
+                        let end_pos = (offset as u64) + (data.len() as u64);
+                        std::cmp::max(inode_data.attr.size, end_pos)
+                    };
+                    
+                    inode_data.attr.size = new_size;
+                    inode_data.attr.blocks = (new_size + 511) / 512;
                     inode_data.attr.mtime = SystemTime::now();
                 }
                 reply.written(data.len() as u32);
@@ -614,7 +622,7 @@ impl Filesystem for MergerFS {
         mode: Option<u32>,
         uid: Option<u32>,
         gid: Option<u32>,
-        _size: Option<u64>,
+        size: Option<u64>,
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
@@ -625,7 +633,7 @@ impl Filesystem for MergerFS {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        debug!("setattr: ino={}, mode={:?}, uid={:?}, gid={:?}", ino, mode, uid, gid);
+        info!("setattr: ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}", ino, mode, uid, gid, size);
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -637,6 +645,26 @@ impl Filesystem for MergerFS {
 
         let path = Path::new(&inode_data.path);
         let mut had_success = false;
+
+        // Handle truncate
+        if let Some(new_size) = size {
+            info!("Truncating file {} to size {}", inode_data.path, new_size);
+            
+            match self.file_manager.truncate_file(path, new_size) {
+                Ok(_) => {
+                    had_success = true;
+                    // Update size in inode
+                    let mut inodes = self.inodes.write();
+                    if let Some(cached_data) = inodes.get_mut(&ino) {
+                        cached_data.attr.size = new_size;
+                        cached_data.attr.blocks = (new_size + 511) / 512;
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to truncate file: {:?}", e);
+                }
+            }
+        }
 
         // Handle chmod
         if let Some(new_mode) = mode {
@@ -689,7 +717,7 @@ impl Filesystem for MergerFS {
             }
         }
 
-        if had_success || (mode.is_none() && uid.is_none() && gid.is_none() && atime.is_none() && mtime.is_none()) {
+        if had_success || (mode.is_none() && uid.is_none() && gid.is_none() && size.is_none() && atime.is_none() && mtime.is_none()) {
             // Get updated attributes and return them
             match self.create_file_attr(path, inode_data.attr.kind == FileType::Directory) {
                 Some(mut new_attr) => {
@@ -710,6 +738,20 @@ impl Filesystem for MergerFS {
         } else {
             reply.error(EIO);
         }
+    }
+
+    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: fuser::ReplyEmpty) {
+        info!("flush: ino={}", ino);
+        // For now, we don't need to do anything special for flush
+        // since we write synchronously
+        reply.ok();
+    }
+
+    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: fuser::ReplyEmpty) {
+        info!("fsync: ino={}", ino);
+        // For now, we don't need to do anything special for fsync
+        // since we write synchronously
+        reply.ok();
     }
 }
 

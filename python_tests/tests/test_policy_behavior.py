@@ -99,7 +99,7 @@ class TestCreatePolicies:
                 assert 2 in locations, f"File {filename} should be in branch 2 (least free space), found in: {locations}"
                 assert len(locations) == 1, f"File {filename} should only be in one branch, found in: {locations}"
     
-    @pytest.mark.parametrize("policy", ["ff", "mfs", "lfs"])
+    @pytest.mark.parametrize("policy", ["ff", "mfs", "lfs", "rand"])
     def test_policy_file_reading(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path, policy: str):
         """Test that files can be read regardless of which policy created them."""
         config = FuseConfig(
@@ -128,7 +128,7 @@ class TestCreatePolicies:
         results = {}
         
         # Test each policy
-        for policy in ["ff", "mfs", "lfs"]:
+        for policy in ["ff", "mfs", "lfs", "rand"]:
             config = FuseConfig(
                 policy=policy,
                 branches=temp_branches,
@@ -143,10 +143,11 @@ class TestCreatePolicies:
                 locations = fs_state.get_file_locations(branches, f"{policy}_unique.txt")
                 results[policy] = locations[0] if locations else -1
         
-        # Verify each policy made different choices
+        # Verify each policy made expected choices
         assert results["ff"] == 0, "FirstFound should use first branch (0)"
         assert results["mfs"] == 0, "MostFreeSpace should use branch with most space (0)"  
         assert results["lfs"] == 2, "LeastFreeSpace should use branch with least space (2)"
+        assert results["rand"] in [0, 1, 2], "Random should use one of the available branches"
         
         # Verify MFS and LFS made different choices
         assert results["mfs"] != results["lfs"], "MFS and LFS should select different branches"
