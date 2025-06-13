@@ -7,12 +7,13 @@ use fuser::{
 };
 // Use standard errno constants compatible with MUSL
 const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const EACCES: i32 = 13;
 const ENOTDIR: i32 = 20;
 const EINVAL: i32 = 22;
-const EIO: i32 = 5;
-const ENOTEMPTY: i32 = 39;
-const EACCES: i32 = 13;
 const EROFS: i32 = 30;
+const ENOTEMPTY: i32 = 39;
+const ENOSYS: i32 = 38;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -751,6 +752,764 @@ impl Filesystem for MergerFS {
         info!("fsync: ino={}", ino);
         // For now, we don't need to do anything special for fsync
         // since we write synchronously
+        reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuser::ReplyStatfs) {
+        info!("statfs called");
+        
+        // Aggregate statistics from all branches
+        let mut total_blocks = 0u64;
+        let mut total_bfree = 0u64;
+        let mut total_bavail = 0u64;
+        let mut total_files = 0u64;
+        let mut total_ffree = 0u64;
+        let mut min_frsize = u32::MAX;
+        let mut min_bsize = u32::MAX;
+        
+        for branch in &self.file_manager.branches {
+            if let Ok(metadata) = std::fs::metadata(&branch.path) {
+                // Get filesystem stats for this branch
+                // Note: This is a simplified implementation
+                // In production, we'd use statvfs system call
+                
+                use std::os::unix::fs::MetadataExt;
+                let blocks = metadata.blocks();
+                let blksize = metadata.blksize() as u32;
+                
+                total_blocks += blocks;
+                min_bsize = min_bsize.min(blksize);
+                min_frsize = min_frsize.min(blksize);
+                
+                // For available space, we'd need actual statvfs
+                // This is a placeholder
+                total_bfree += blocks / 10;  // Assume 10% free
+                total_bavail += blocks / 10;
+                total_files += 1000000;  // Placeholder
+                total_ffree += 100000;   // Placeholder
+            }
+        }
+        
+        // If we couldn't get any stats, use defaults
+        if min_bsize == u32::MAX {
+            min_bsize = 4096;
+            min_frsize = 4096;
+        }
+        
+        reply.statfs(
+            total_blocks,  // total blocks
+            total_bfree,   // free blocks
+            total_bavail,  // available blocks
+            total_files,   // total file nodes
+            total_ffree,   // free file nodes
+            min_bsize,     // block size
+            200,           // maximum filename length
+            min_frsize,    // fragment size
+        );
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        info!("rename: parent={}, name={:?} -> newparent={}, newname={:?}", 
+            parent, name, newparent, newname);
+
+        let parent_data = match self.get_inode_data(parent) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let newparent_data = match self.get_inode_data(newparent) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
+            }
+        };
+
+        let newname_str = match newname.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
+            }
+        };
+
+        let old_path = if parent_data.path == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent_data.path, name_str)
+        };
+
+        let new_path = if newparent_data.path == "/" {
+            format!("/{}", newname_str)
+        } else {
+            format!("{}/{}", newparent_data.path, newname_str)
+        };
+
+        // Find which branch has the source file/directory
+        let mut source_branch = None;
+        for branch in &self.file_manager.branches {
+            let full_old_path = branch.full_path(Path::new(&old_path));
+            if full_old_path.exists() {
+                source_branch = Some(branch);
+                break;
+            }
+        }
+
+        match source_branch {
+            Some(branch) => {
+                if !branch.allows_create() {
+                    reply.error(EROFS);
+                    return;
+                }
+
+                let full_old_path = branch.full_path(Path::new(&old_path));
+                let full_new_path = branch.full_path(Path::new(&new_path));
+
+                // Create parent directory if needed
+                if let Some(parent) = full_new_path.parent() {
+                    if let Err(_) = std::fs::create_dir_all(parent) {
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+
+                // Perform the rename
+                match std::fs::rename(&full_old_path, &full_new_path) {
+                    Ok(_) => {
+                        // Update inode cache
+                        let mut inodes = self.inodes.write();
+                        let mut updates = Vec::new();
+                        
+                        for (&ino, data) in inodes.iter() {
+                            if data.path == old_path {
+                                updates.push((ino, new_path.clone()));
+                            } else if data.path.starts_with(&format!("{}/", old_path)) {
+                                // Update children paths
+                                let suffix = &data.path[old_path.len()..];
+                                updates.push((ino, format!("{}{}", new_path, suffix)));
+                            }
+                        }
+                        
+                        for (ino, new_path) in updates {
+                            if let Some(data) = inodes.get_mut(&ino) {
+                                data.path = new_path;
+                            }
+                        }
+                        
+                        reply.ok();
+                    }
+                    Err(e) => {
+                        error!("Rename failed: {:?}", e);
+                        reply.error(EIO);
+                    }
+                }
+            }
+            None => {
+                reply.error(ENOENT);
+            }
+        }
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        info!("symlink: parent={}, link_name={:?} -> target={:?}", 
+            parent, link_name, target);
+
+        let parent_data = match self.get_inode_data(parent) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let link_name_str = match link_name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
+            }
+        };
+
+        let link_path = if parent_data.path == "/" {
+            format!("/{}", link_name_str)
+        } else {
+            format!("{}/{}", parent_data.path, link_name_str)
+        };
+
+        // Use create policy to determine which branch
+        let path = Path::new(&link_path);
+        match self.file_manager.create_policy.select_branch(&self.file_manager.branches, path) {
+            Ok(branch) => {
+                let full_link_path = branch.full_path(path);
+                
+                // Create parent directories if needed
+                if let Some(parent) = full_link_path.parent() {
+                    if let Err(_) = std::fs::create_dir_all(parent) {
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+
+                // Create the symlink
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+                    match symlink(target, &full_link_path) {
+                        Ok(_) => {
+                            // Create inode for the symlink
+                            let now = SystemTime::now();
+                            let ino = self.allocate_inode();
+                            
+                            let attr = FileAttr {
+                                ino,
+                                size: target.as_os_str().len() as u64,
+                                blocks: 1,
+                                atime: now,
+                                mtime: now,
+                                ctime: now,
+                                crtime: now,
+                                kind: FileType::Symlink,
+                                perm: 0o777,
+                                nlink: 1,
+                                uid: 1000,
+                                gid: 1000,
+                                rdev: 0,
+                                flags: 0,
+                                blksize: 512,
+                            };
+
+                            let inode_data = InodeData {
+                                path: link_path,
+                                attr,
+                            };
+
+                            self.inodes.write().insert(ino, inode_data);
+                            reply.entry(&TTL, &attr, 0);
+                        }
+                        Err(e) => {
+                            error!("Failed to create symlink: {:?}", e);
+                            reply.error(EIO);
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    reply.error(ENOSYS);
+                }
+            }
+            Err(e) => {
+                reply.error(e.errno());
+            }
+        }
+    }
+
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: fuser::ReplyData) {
+        info!("readlink: ino={}", ino);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if inode_data.attr.kind != FileType::Symlink {
+            reply.error(EINVAL);
+            return;
+        }
+
+        let path = Path::new(&inode_data.path);
+        
+        // Find which branch has the symlink
+        for branch in &self.file_manager.branches {
+            let full_path = branch.full_path(path);
+            if full_path.exists() {
+                match std::fs::read_link(&full_path) {
+                    Ok(target) => {
+                        use std::os::unix::ffi::OsStrExt;
+                        reply.data(target.as_os_str().as_bytes());
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Failed to read symlink: {:?}", e);
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+            }
+        }
+        
+        reply.error(ENOENT);
+    }
+
+    fn link(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        info!("link: ino={}, newparent={}, newname={:?}", ino, newparent, newname);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let newparent_data = match self.get_inode_data(newparent) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let newname_str = match newname.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
+            }
+        };
+
+        let source_path = Path::new(&inode_data.path);
+        let link_path = if newparent_data.path == "/" {
+            format!("/{}", newname_str)
+        } else {
+            format!("{}/{}", newparent_data.path, newname_str)
+        };
+
+        // Find which branch has the source file
+        let mut source_branch = None;
+        for branch in &self.file_manager.branches {
+            let full_source = branch.full_path(source_path);
+            if full_source.exists() && full_source.is_file() {
+                source_branch = Some(branch);
+                break;
+            }
+        }
+
+        match source_branch {
+            Some(branch) => {
+                if !branch.allows_create() {
+                    reply.error(EROFS);
+                    return;
+                }
+
+                let full_source = branch.full_path(source_path);
+                let full_link = branch.full_path(Path::new(&link_path));
+
+                // Create parent directories if needed
+                if let Some(parent) = full_link.parent() {
+                    if let Err(_) = std::fs::create_dir_all(parent) {
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+
+                // Create the hard link
+                match std::fs::hard_link(&full_source, &full_link) {
+                    Ok(_) => {
+                        // Update the existing inode's link count
+                        let mut inodes = self.inodes.write();
+                        if let Some(data) = inodes.get_mut(&ino) {
+                            data.attr.nlink += 1;
+                        }
+                        
+                        // Return the existing inode attributes
+                        reply.entry(&TTL, &inode_data.attr, 0);
+                    }
+                    Err(e) => {
+                        error!("Failed to create hard link: {:?}", e);
+                        reply.error(EIO);
+                    }
+                }
+            }
+            None => {
+                reply.error(ENOENT);
+            }
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        info!("release: ino={}", ino);
+        // Clean up any resources associated with the file handle
+        // For now, we don't track file handles, so this is a no-op
+        reply.ok();
+    }
+
+    fn access(&mut self, _req: &Request, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
+        info!("access: ino={}, mask={}", ino, mask);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Check if file exists in any branch
+        let path = Path::new(&inode_data.path);
+        let exists = self.file_manager.branches.iter().any(|branch| {
+            branch.full_path(path).exists()
+        });
+
+        if exists {
+            // For now, we allow all access if the file exists
+            // A proper implementation would check actual permissions
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn getxattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        name: &OsStr,
+        size: u32,
+        reply: fuser::ReplyXattr,
+    ) {
+        info!("getxattr: ino={}, name={:?}, size={}", ino, name, size);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let path = Path::new(&inode_data.path);
+        
+        // Find first branch that has the file
+        for branch in &self.file_manager.branches {
+            let full_path = branch.full_path(path);
+            if full_path.exists() {
+                #[cfg(target_os = "linux")]
+                {
+                    use std::ffi::CString;
+                    use std::os::unix::ffi::OsStrExt;
+                    
+                    let path_str = match full_path.to_str() {
+                        Some(s) => s,
+                        None => {
+                            reply.error(EINVAL);
+                            return;
+                        }
+                    };
+                    
+                    let c_path = match CString::new(path_str) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            reply.error(EINVAL);
+                            return;
+                        }
+                    };
+                    
+                    let c_name = match CString::new(name.as_bytes()) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            reply.error(EINVAL);
+                            return;
+                        }
+                    };
+                    
+                    // This is a placeholder - proper implementation would use xattr syscalls
+                    reply.error(ENOSYS);
+                    return;
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    reply.error(ENOSYS);
+                    return;
+                }
+            }
+        }
+        
+        reply.error(ENOENT);
+    }
+
+    fn setxattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        _position: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        info!("setxattr: ino={}, name={:?}, value_len={}, flags={}", 
+            ino, name, value.len(), flags);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let path = Path::new(&inode_data.path);
+        
+        // Set xattr on all branches that have the file
+        let mut found_any = false;
+        for branch in &self.file_manager.branches {
+            if !branch.allows_create() {
+                continue;
+            }
+            
+            let full_path = branch.full_path(path);
+            if full_path.exists() {
+                found_any = true;
+                #[cfg(target_os = "linux")]
+                {
+                    // This is a placeholder - proper implementation would use xattr syscalls
+                    reply.error(ENOSYS);
+                    return;
+                }
+            }
+        }
+        
+        if found_any {
+            #[cfg(not(target_os = "linux"))]
+            reply.error(ENOSYS);
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn listxattr(&mut self, _req: &Request, ino: u64, size: u32, reply: fuser::ReplyXattr) {
+        info!("listxattr: ino={}, size={}", ino, size);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let path = Path::new(&inode_data.path);
+        
+        // List xattrs from first branch that has the file
+        for branch in &self.file_manager.branches {
+            let full_path = branch.full_path(path);
+            if full_path.exists() {
+                #[cfg(target_os = "linux")]
+                {
+                    // This is a placeholder - proper implementation would use xattr syscalls
+                    if size == 0 {
+                        reply.size(0); // Return size needed
+                    } else {
+                        reply.data(&[]); // Return empty list
+                    }
+                    return;
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    reply.error(ENOSYS);
+                    return;
+                }
+            }
+        }
+        
+        reply.error(ENOENT);
+    }
+
+    fn removexattr(&mut self, _req: &Request, ino: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        info!("removexattr: ino={}, name={:?}", ino, name);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let path = Path::new(&inode_data.path);
+        
+        // Remove xattr from all branches that have the file
+        let mut found_any = false;
+        for branch in &self.file_manager.branches {
+            if !branch.allows_create() {
+                continue;
+            }
+            
+            let full_path = branch.full_path(path);
+            if full_path.exists() {
+                found_any = true;
+                #[cfg(target_os = "linux")]
+                {
+                    // This is a placeholder - proper implementation would use xattr syscalls
+                    reply.error(ENOSYS);
+                    return;
+                }
+            }
+        }
+        
+        if found_any {
+            #[cfg(not(target_os = "linux"))]
+            reply.error(ENOSYS);
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn mknod(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        info!("mknod: parent={}, name={:?}, mode={:o}, rdev={}", parent, name, mode, rdev);
+
+        let parent_data = match self.get_inode_data(parent) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
+            }
+        };
+
+        let file_path = if parent_data.path == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent_data.path, name_str)
+        };
+
+        // For now, we only support regular files through mknod
+        // Special files (devices, pipes, sockets) are not supported
+        if (mode & 0o170000) == 0o100000 {
+            // Regular file - create it like create()
+            let path = Path::new(&file_path);
+            match self.file_manager.create_file(path, &[]) {
+                Ok(_) => {
+                    if let Some(mut attr) = self.create_file_attr(path, false) {
+                        let ino = self.allocate_inode();
+                        attr.ino = ino;
+                        attr.perm = (mode & 0o7777) as u16;
+
+                        let inode_data = InodeData {
+                            path: file_path,
+                            attr,
+                        };
+
+                        self.inodes.write().insert(ino, inode_data);
+                        reply.entry(&TTL, &attr, 0);
+                    } else {
+                        reply.error(EIO);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to create file: {:?}", e);
+                    reply.error(e.errno());
+                }
+            }
+        } else {
+            // Special files not supported
+            reply.error(ENOSYS);
+        }
+    }
+
+    fn opendir(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        info!("opendir: ino={}", ino);
+
+        let inode_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if inode_data.attr.kind != FileType::Directory {
+            reply.error(ENOTDIR);
+            return;
+        }
+
+        // For now, we don't track directory handles
+        reply.opened(0, 0);
+    }
+
+    fn releasedir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        info!("releasedir: ino={}", ino);
+        reply.ok();
+    }
+
+    fn fsyncdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        info!("fsyncdir: ino={}", ino);
         reply.ok();
     }
 }

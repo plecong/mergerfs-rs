@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 pub struct FileManager {
     pub branches: Vec<Arc<Branch>>,
-    create_policy: Box<dyn CreatePolicy>,
+    pub create_policy: Box<dyn CreatePolicy>,
 }
 
 impl FileManager {
