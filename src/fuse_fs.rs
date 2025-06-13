@@ -5,6 +5,7 @@ use crate::metadata_ops::MetadataManager;
 use crate::file_handle::FileHandleManager;
 use crate::xattr::{XattrManager, XattrError, XattrFlags};
 use crate::policy::{FirstFoundSearchPolicy};
+use crate::config_manager::{ConfigManager, ConfigError};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
     ReplyOpen, ReplyWrite, Request,
@@ -27,6 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
 const TTL: Duration = Duration::from_secs(1);
+const CONTROL_FILE_INO: u64 = u64::MAX; // Special inode for /.mergerfs
 
 pub struct MergerFS {
     pub file_manager: Arc<FileManager>,
@@ -34,6 +36,7 @@ pub struct MergerFS {
     pub config: ConfigRef,
     pub file_handle_manager: Arc<FileHandleManager>,
     pub xattr_manager: Arc<XattrManager>,
+    pub config_manager: Arc<ConfigManager>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
 }
@@ -61,6 +64,7 @@ impl MergerFS {
         );
         
         let config = crate::config::create_config();
+        let config_manager = ConfigManager::new(config.clone());
         
         let mut inodes = HashMap::new();
         
@@ -94,6 +98,7 @@ impl MergerFS {
             config,
             file_handle_manager: Arc::new(FileHandleManager::new()),
             xattr_manager: Arc::new(xattr_manager),
+            config_manager: Arc::new(config_manager),
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
         }
@@ -182,6 +187,29 @@ impl Filesystem for MergerFS {
         } else {
             format!("{}/{}", parent_data.path, name_str)
         };
+        
+        // Handle special control file
+        if child_path == "/.mergerfs" {
+            let attr = FileAttr {
+                ino: CONTROL_FILE_INO,
+                size: 0,
+                blocks: 0,
+                atime: SystemTime::now(),
+                mtime: SystemTime::now(),
+                ctime: SystemTime::now(),
+                crtime: SystemTime::now(),
+                kind: FileType::RegularFile,
+                perm: 0o444, // Read-only for all
+                nlink: 1,
+                uid: 0, // Owned by root
+                gid: 0,
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+            reply.entry(&TTL, &attr, 0);
+            return;
+        }
 
         // Check if we already have this inode
         if let Some(ino) = self.path_to_inode(&child_path) {
@@ -211,6 +239,29 @@ impl Filesystem for MergerFS {
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         debug!("getattr: ino={}", ino);
+
+        // Handle special control file
+        if ino == CONTROL_FILE_INO {
+            let attr = FileAttr {
+                ino: CONTROL_FILE_INO,
+                size: 0,
+                blocks: 0,
+                atime: SystemTime::now(),
+                mtime: SystemTime::now(),
+                ctime: SystemTime::now(),
+                crtime: SystemTime::now(),
+                kind: FileType::RegularFile,
+                perm: 0o444,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+            reply.attr(&TTL, &attr);
+            return;
+        }
 
         match self.get_inode_data(ino) {
             Some(data) => reply.attr(&TTL, &data.attr),
@@ -380,6 +431,11 @@ impl Filesystem for MergerFS {
             (1, FileType::Directory, "..".to_string()),
         ];
 
+        // Add control file to root directory listing
+        if data.path == "/" {
+            entries.push((CONTROL_FILE_INO, FileType::RegularFile, ".mergerfs".to_string()));
+        }
+        
         // Get union directory listing
         let path = Path::new(&data.path);
         match self.file_manager.list_directory(path) {
@@ -1431,6 +1487,32 @@ impl Filesystem for MergerFS {
         reply: fuser::ReplyXattr,
     ) {
         info!("getxattr: ino={}, name={:?}, size={}", ino, name, size);
+        
+        // Handle control file xattr
+        if ino == CONTROL_FILE_INO {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(EINVAL);
+                    return;
+                }
+            };
+            
+            match self.config_manager.get_option(name_str) {
+                Ok(value) => {
+                    let data = value.as_bytes();
+                    if size == 0 {
+                        reply.size(data.len() as u32);
+                    } else if size < data.len() as u32 {
+                        reply.error(ERANGE);
+                    } else {
+                        reply.data(data);
+                    }
+                }
+                Err(err) => reply.error(err.errno()),
+            }
+            return;
+        }
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -1481,6 +1563,31 @@ impl Filesystem for MergerFS {
     ) {
         info!("setxattr: ino={}, name={:?}, value_len={}, flags={}", 
             ino, name, value.len(), flags);
+            
+        // Handle control file xattr
+        if ino == CONTROL_FILE_INO {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(EINVAL);
+                    return;
+                }
+            };
+            
+            let value_str = match std::str::from_utf8(value) {
+                Ok(s) => s,
+                Err(_) => {
+                    reply.error(EINVAL);
+                    return;
+                }
+            };
+            
+            match self.config_manager.set_option(name_str, value_str) {
+                Ok(_) => reply.ok(),
+                Err(err) => reply.error(err.errno()),
+            }
+            return;
+        }
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -1520,6 +1627,27 @@ impl Filesystem for MergerFS {
 
     fn listxattr(&mut self, _req: &Request, ino: u64, size: u32, reply: fuser::ReplyXattr) {
         info!("listxattr: ino={}, size={}", ino, size);
+        
+        // Handle control file xattr
+        if ino == CONTROL_FILE_INO {
+            let options = self.config_manager.list_options();
+            
+            // Build null-terminated list
+            let mut data = Vec::new();
+            for option in &options {
+                data.extend(option.as_bytes());
+                data.push(0);
+            }
+            
+            if size == 0 {
+                reply.size(data.len() as u32);
+            } else if size < data.len() as u32 {
+                reply.error(ERANGE);
+            } else {
+                reply.data(&data);
+            }
+            return;
+        }
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,

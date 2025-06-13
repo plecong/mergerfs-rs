@@ -12,6 +12,8 @@ pub use traits::{ActionPolicy, CreatePolicy, SearchPolicy};
 // Re-export all policy implementations
 pub use action::{
     AllActionPolicy,
+    existing_path_all::ExistingPathAllActionPolicy,
+    existing_path_first_found::ExistingPathFirstFoundActionPolicy,
 };
 
 pub use create::{

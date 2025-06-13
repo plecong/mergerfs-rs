@@ -1,5 +1,6 @@
 mod branch;
 mod config;
+mod config_manager;
 mod policy;
 mod metadata_ops;
 mod file_ops;
