@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub enum BranchMode {
     ReadWrite,
     ReadOnly,
+    NoCreate,  // Branch can be read and modified but not used for new file creation
 }
 
 #[derive(Debug)]
@@ -19,6 +20,18 @@ impl Branch {
 
     pub fn allows_create(&self) -> bool {
         matches!(self.mode, BranchMode::ReadWrite)
+    }
+    
+    pub fn is_readonly(&self) -> bool {
+        matches!(self.mode, BranchMode::ReadOnly)
+    }
+    
+    pub fn is_no_create(&self) -> bool {
+        matches!(self.mode, BranchMode::NoCreate)
+    }
+    
+    pub fn is_readonly_or_no_create(&self) -> bool {
+        matches!(self.mode, BranchMode::ReadOnly | BranchMode::NoCreate)
     }
 
     pub fn full_path(&self, relative_path: &Path) -> PathBuf {

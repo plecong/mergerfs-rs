@@ -1,3 +1,4 @@
+use crate::config::{Config, ConfigRef, StatFSMode, StatFSIgnore};
 use crate::policy::{AllActionPolicy, PolicyError};
 use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
@@ -19,13 +20,14 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 const TTL: Duration = Duration::from_secs(1);
 
 pub struct MergerFS {
     pub file_manager: Arc<FileManager>,
     pub metadata_manager: Arc<MetadataManager>,
+    pub config: ConfigRef,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
 }
@@ -42,6 +44,8 @@ impl MergerFS {
         let branches = file_manager.branches.clone();
         let action_policy = Box::new(AllActionPolicy);
         let metadata_manager = MetadataManager::new(branches, action_policy);
+        
+        let config = crate::config::create_config();
         
         let mut inodes = HashMap::new();
         
@@ -72,6 +76,7 @@ impl MergerFS {
         Self {
             file_manager: Arc::new(file_manager),
             metadata_manager: Arc::new(metadata_manager),
+            config,
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
         }
@@ -758,53 +763,114 @@ impl Filesystem for MergerFS {
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuser::ReplyStatfs) {
         info!("statfs called");
         
-        // Aggregate statistics from all branches
+        use nix::sys::statvfs::{statvfs, FsFlags};
+        use std::collections::HashMap;
+        
+        let config = self.config.read();
+        let statfs_ignore = config.statfs_ignore;
+        
+        // Keep track of unique device IDs to avoid counting same filesystem multiple times
+        let mut fs_stats: HashMap<u64, (nix::sys::statvfs::Statvfs, Arc<crate::branch::Branch>)> = HashMap::new();
+        let mut min_bsize = u64::MAX;
+        let mut min_frsize = u64::MAX;
+        let mut min_namemax = u64::MAX;
+        
+        // Collect statvfs data for each branch
+        for branch in &self.file_manager.branches {
+            match std::fs::metadata(&branch.path) {
+                Ok(metadata) => {
+                    use std::os::unix::fs::MetadataExt;
+                    let dev = metadata.dev();
+                    
+                    // Get filesystem stats using statvfs
+                    match statvfs(&branch.path) {
+                        Ok(stat) => {
+                            // Track minimum values for normalization
+                            if stat.block_size() > 0 && stat.block_size() < min_bsize {
+                                min_bsize = stat.block_size();
+                            }
+                            if stat.fragment_size() > 0 && stat.fragment_size() < min_frsize {
+                                min_frsize = stat.fragment_size();
+                            }
+                            if stat.name_max() > 0 && stat.name_max() < min_namemax {
+                                min_namemax = stat.name_max();
+                            }
+                            
+                            // Store stats by device ID to avoid duplicates
+                            fs_stats.insert(dev, (stat, branch.clone()));
+                        }
+                        Err(e) => {
+                            error!("Failed to get statvfs for {}: {}", branch.path.display(), e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to get metadata for {}: {}", branch.path.display(), e);
+                }
+            }
+        }
+        
+        // If we couldn't get any stats, use defaults
+        if fs_stats.is_empty() {
+            reply.statfs(0, 0, 0, 0, 0, 4096, 255, 4096);
+            return;
+        }
+        
+        // Use defaults if we didn't find valid minimums
+        if min_bsize == u64::MAX {
+            min_bsize = 4096;
+        }
+        if min_frsize == u64::MAX {
+            min_frsize = 4096;
+        }
+        if min_namemax == u64::MAX {
+            min_namemax = 255;
+        }
+        
+        // Aggregate statistics from unique filesystems
         let mut total_blocks = 0u64;
         let mut total_bfree = 0u64;
         let mut total_bavail = 0u64;
         let mut total_files = 0u64;
         let mut total_ffree = 0u64;
-        let mut min_frsize = u32::MAX;
-        let mut min_bsize = u32::MAX;
+        let mut _total_favail = 0u64;
         
-        for branch in &self.file_manager.branches {
-            if let Ok(metadata) = std::fs::metadata(&branch.path) {
-                // Get filesystem stats for this branch
-                // Note: This is a simplified implementation
-                // In production, we'd use statvfs system call
-                
-                use std::os::unix::fs::MetadataExt;
-                let blocks = metadata.blocks();
-                let blksize = metadata.blksize() as u32;
-                
-                total_blocks += blocks;
-                min_bsize = min_bsize.min(blksize);
-                min_frsize = min_frsize.min(blksize);
-                
-                // For available space, we'd need actual statvfs
-                // This is a placeholder
-                total_bfree += blocks / 10;  // Assume 10% free
-                total_bavail += blocks / 10;
-                total_files += 1000000;  // Placeholder
-                total_ffree += 100000;   // Placeholder
+        for (stat, branch) in fs_stats.values() {
+            // Check if we should ignore this branch based on StatFSIgnore configuration
+            let is_readonly = stat.flags().contains(FsFlags::ST_RDONLY);
+            let should_ignore = match statfs_ignore {
+                StatFSIgnore::None => false,
+                StatFSIgnore::ReadOnly => is_readonly || branch.is_readonly_or_no_create(),
+                StatFSIgnore::NoCreate => branch.is_no_create(),
+            };
+            
+            // Normalize block counts to common fragment size (like the C++ version)
+            let normalization_factor = stat.fragment_size() / min_frsize;
+            
+            total_blocks += stat.blocks() * normalization_factor;
+            total_bfree += stat.blocks_free() * normalization_factor;
+            
+            // If we should ignore this branch, don't count its available space
+            if should_ignore {
+                // Still count the blocks but not available space
+                total_files += stat.files();
+            } else {
+                total_bavail += stat.blocks_available() * normalization_factor;
+                total_files += stat.files();
+                total_ffree += stat.files_free();
+                _total_favail += stat.files_available();
             }
         }
         
-        // If we couldn't get any stats, use defaults
-        if min_bsize == u32::MAX {
-            min_bsize = 4096;
-            min_frsize = 4096;
-        }
-        
         reply.statfs(
-            total_blocks,  // total blocks
-            total_bfree,   // free blocks
-            total_bavail,  // available blocks
-            total_files,   // total file nodes
-            total_ffree,   // free file nodes
-            min_bsize,     // block size
-            200,           // maximum filename length
-            min_frsize,    // fragment size
+            total_blocks,
+            total_bfree,
+            total_bavail,
+            total_files,
+            total_ffree,
+            min_bsize as u32,
+            min_namemax as u32,
+            min_frsize as u32,
         );
     }
 
