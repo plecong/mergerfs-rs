@@ -67,6 +67,12 @@ The heart of mergerfs - determines which filesystem branches to use for operatio
 - Use parking_lot for performance-critical locks
 - Error handling with thiserror and proper errno mapping
 
+### Coding Style
+- **Small, focused files**: Keep source files small and focused on a single responsibility
+- **Separate functionality**: Each implementation (e.g., each policy) should be in its own file
+- **Modular organization**: Use directory structure to logically group related functionality
+- **Clear module exports**: Use mod.rs files to cleanly export public interfaces
+
 ### Performance Considerations
 - Cache filesystem metadata (free space, branch info)
 - Use thread pools for FUSE operations

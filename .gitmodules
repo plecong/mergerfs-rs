@@ -1,0 +1,3 @@
+[submodule "docs/mergerfs-original"]
+	path = docs/mergerfs-original
+	url = https://github.com/trapexit/mergerfs

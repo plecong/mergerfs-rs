@@ -1,4 +1,5 @@
-use crate::branch::{Branch, CreatePolicy, PolicyError};
+use crate::branch::Branch;
+use crate::policy::{CreatePolicy, PolicyError};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};

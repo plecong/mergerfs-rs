@@ -1,5 +1,4 @@
-use crate::action_policy::AllActionPolicy;
-use crate::branch::PolicyError;
+use crate::policy::{AllActionPolicy, PolicyError};
 use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
 use fuser::{

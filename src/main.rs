@@ -1,6 +1,5 @@
 mod branch;
 mod policy;
-mod action_policy;
 mod metadata_ops;
 mod file_ops;
 mod fuse_fs;
@@ -15,7 +14,7 @@ use std::sync::Arc;
 use branch::{Branch, BranchMode};
 use file_ops::FileManager;
 use fuse_fs::MergerFS;
-use policy::{FirstFoundCreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy};
+use policy::{FirstFoundCreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy, CreatePolicy};
 
 fn parse_args(args: &[String]) -> (String, PathBuf, Vec<PathBuf>) {
     let mut create_policy = "ff".to_string();
@@ -108,10 +107,10 @@ fn main() {
     }
     
     // Initialize the filesystem with selected policy
-    let (policy_name, policy): (&str, Box<dyn branch::CreatePolicy>) = match create_policy.as_str() {
-        "mfs" => ("MostFreeSpace", Box::new(MostFreeSpaceCreatePolicy)),
-        "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy)),
-        _ => ("FirstFound", Box::new(FirstFoundCreatePolicy)),
+    let (policy_name, policy): (&str, Box<dyn CreatePolicy>) = match create_policy.as_str() {
+        "mfs" => ("MostFreeSpace", Box::new(MostFreeSpaceCreatePolicy::new())),
+        "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy::new())),
+        _ => ("FirstFound", Box::new(FirstFoundCreatePolicy::new())),
     };
     
     let file_manager = FileManager::new(branches, policy);

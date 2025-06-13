@@ -1,5 +1,5 @@
-use crate::action_policy::ActionPolicy;
-use crate::branch::{Branch, PolicyError};
+use crate::branch::Branch;
+use crate::policy::{ActionPolicy, PolicyError};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -224,7 +224,7 @@ pub struct FileMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action_policy::{AllActionPolicy, ExistingPathAllActionPolicy};
+    use crate::policy::{AllActionPolicy, ExistingPathAllActionPolicy};
     use crate::branch::{Branch, BranchMode};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
@@ -254,7 +254,7 @@ mod tests {
         ));
 
         let branches = vec![branch1, branch2, branch3];
-        let policy = Box::new(AllActionPolicy);
+        let policy = Box::new(crate::policy::AllActionPolicy::new());
         let manager = MetadataManager::new(branches, policy);
 
         (vec![temp1, temp2, temp3], manager)
@@ -346,7 +346,7 @@ mod tests {
         ));
 
         let branches = vec![branch1, branch2];
-        let policy = Box::new(ExistingPathAllActionPolicy);
+        let policy = Box::new(crate::policy::ExistingPathAllActionPolicy::new());
         let manager = MetadataManager::new(branches, policy);
 
         // Should only operate on the branch where file exists
@@ -372,7 +372,7 @@ mod tests {
         ));
 
         let branches = vec![branch1, branch2];
-        let policy = Box::new(AllActionPolicy);
+        let policy = Box::new(crate::policy::AllActionPolicy::new());
         let manager = MetadataManager::new(branches, policy);
 
         // Should succeed even if only some branches have the file
