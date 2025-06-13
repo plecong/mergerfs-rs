@@ -17,7 +17,7 @@ impl DiskSpace {
         // that uses filesystem metadata to estimate space usage
         
         // Get the directory metadata
-        let metadata = fs::metadata(path)?;
+        let _metadata = fs::metadata(path)?;
         
         // For testing and Alpine compatibility, we'll simulate disk space calculation
         // In a real production system, you would use the `nix` crate or platform-specific APIs

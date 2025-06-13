@@ -1,8 +1,10 @@
-use crate::config::{Config, ConfigRef, StatFSMode, StatFSIgnore};
+use crate::config::{ConfigRef, StatFSIgnore};
 use crate::policy::{AllActionPolicy, PolicyError};
 use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
-use crate::file_handle::{FileHandleManager, FileHandle};
+use crate::file_handle::FileHandleManager;
+use crate::xattr::{XattrManager, XattrError, XattrFlags};
+use crate::policy::{FirstFoundSearchPolicy};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
     ReplyOpen, ReplyWrite, Request,
@@ -16,6 +18,7 @@ const EINVAL: i32 = 22;
 const EROFS: i32 = 30;
 const ENOTEMPTY: i32 = 39;
 const ENOSYS: i32 = 38;
+const ERANGE: i32 = 34;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -30,6 +33,7 @@ pub struct MergerFS {
     pub metadata_manager: Arc<MetadataManager>,
     pub config: ConfigRef,
     pub file_handle_manager: Arc<FileHandleManager>,
+    pub xattr_manager: Arc<XattrManager>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
 }
@@ -45,7 +49,16 @@ impl MergerFS {
         // Create metadata manager with same branches and AllActionPolicy for consistency
         let branches = file_manager.branches.clone();
         let action_policy = Box::new(AllActionPolicy);
-        let metadata_manager = MetadataManager::new(branches, action_policy);
+        let metadata_manager = MetadataManager::new(branches.clone(), action_policy);
+        
+        // Create xattr manager with search and action policies
+        let xattr_manager = XattrManager::new(
+            branches,
+            Box::new(FirstFoundSearchPolicy),
+            Box::new(AllActionPolicy::new()),
+            Box::new(FirstFoundSearchPolicy),
+            Box::new(AllActionPolicy::new()),
+        );
         
         let config = crate::config::create_config();
         
@@ -80,6 +93,7 @@ impl MergerFS {
             metadata_manager: Arc::new(metadata_manager),
             config,
             file_handle_manager: Arc::new(FileHandleManager::new()),
+            xattr_manager: Arc::new(xattr_manager),
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
         }
@@ -1427,53 +1441,32 @@ impl Filesystem for MergerFS {
         };
 
         let path = Path::new(&inode_data.path);
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
+            }
+        };
         
-        // Find first branch that has the file
-        for branch in &self.file_manager.branches {
-            let full_path = branch.full_path(path);
-            if full_path.exists() {
-                #[cfg(target_os = "linux")]
-                {
-                    use std::ffi::CString;
-                    use std::os::unix::ffi::OsStrExt;
-                    
-                    let path_str = match full_path.to_str() {
-                        Some(s) => s,
-                        None => {
-                            reply.error(EINVAL);
-                            return;
-                        }
-                    };
-                    
-                    let c_path = match CString::new(path_str) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            reply.error(EINVAL);
-                            return;
-                        }
-                    };
-                    
-                    let c_name = match CString::new(name.as_bytes()) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            reply.error(EINVAL);
-                            return;
-                        }
-                    };
-                    
-                    // This is a placeholder - proper implementation would use xattr syscalls
-                    reply.error(ENOSYS);
-                    return;
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    reply.error(ENOSYS);
-                    return;
+        match self.xattr_manager.get_xattr(path, name_str) {
+            Ok(value) => {
+                if size == 0 {
+                    // Caller is asking for the size
+                    reply.size(value.len() as u32);
+                } else if size < value.len() as u32 {
+                    // Buffer too small
+                    reply.error(ERANGE);
+                } else {
+                    // Return the data
+                    reply.data(&value);
                 }
             }
+            Err(XattrError::NotFound) => reply.error(61), // ENOATTR
+            Err(XattrError::PermissionDenied) => reply.error(EACCES),
+            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
+            Err(_) => reply.error(EIO),
         }
-        
-        reply.error(ENOENT);
     }
 
     fn setxattr(
@@ -1498,31 +1491,30 @@ impl Filesystem for MergerFS {
         };
 
         let path = Path::new(&inode_data.path);
-        
-        // Set xattr on all branches that have the file
-        let mut found_any = false;
-        for branch in &self.file_manager.branches {
-            if !branch.allows_create() {
-                continue;
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
             }
-            
-            let full_path = branch.full_path(path);
-            if full_path.exists() {
-                found_any = true;
-                #[cfg(target_os = "linux")]
-                {
-                    // This is a placeholder - proper implementation would use xattr syscalls
-                    reply.error(ENOSYS);
-                    return;
-                }
-            }
-        }
+        };
         
-        if found_any {
-            #[cfg(not(target_os = "linux"))]
-            reply.error(ENOSYS);
-        } else {
-            reply.error(ENOENT);
+        // Convert FUSE flags to our XattrFlags
+        let xattr_flags = match flags {
+            1 => XattrFlags::Create,  // XATTR_CREATE
+            2 => XattrFlags::Replace, // XATTR_REPLACE
+            _ => XattrFlags::None,
+        };
+        
+        match self.xattr_manager.set_xattr(path, name_str, value, xattr_flags) {
+            Ok(_) => reply.ok(),
+            Err(XattrError::NotFound) => reply.error(ENOENT),
+            Err(XattrError::PermissionDenied) => reply.error(EACCES),
+            Err(XattrError::InvalidArgument) => reply.error(EINVAL),
+            Err(XattrError::NameTooLong) => reply.error(36), // ENAMETOOLONG
+            Err(XattrError::ValueTooLarge) => reply.error(7), // E2BIG
+            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
+            Err(_) => reply.error(EIO),
         }
     }
 
@@ -1539,29 +1531,30 @@ impl Filesystem for MergerFS {
 
         let path = Path::new(&inode_data.path);
         
-        // List xattrs from first branch that has the file
-        for branch in &self.file_manager.branches {
-            let full_path = branch.full_path(path);
-            if full_path.exists() {
-                #[cfg(target_os = "linux")]
-                {
-                    // This is a placeholder - proper implementation would use xattr syscalls
-                    if size == 0 {
-                        reply.size(0); // Return size needed
-                    } else {
-                        reply.data(&[]); // Return empty list
-                    }
-                    return;
+        match self.xattr_manager.list_xattr(path) {
+            Ok(attrs) => {
+                // Build null-terminated list of attribute names
+                let mut data = Vec::new();
+                for attr in &attrs {
+                    data.extend(attr.as_bytes());
+                    data.push(0); // null terminator
                 }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    reply.error(ENOSYS);
-                    return;
+                
+                if size == 0 {
+                    // Caller is asking for the size
+                    reply.size(data.len() as u32);
+                } else if size < data.len() as u32 {
+                    // Buffer too small
+                    reply.error(ERANGE);
+                } else {
+                    // Return the data
+                    reply.data(&data);
                 }
             }
+            Err(XattrError::NotFound) => reply.error(ENOENT),
+            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
+            Err(_) => reply.error(EIO),
         }
-        
-        reply.error(ENOENT);
     }
 
     fn removexattr(&mut self, _req: &Request, ino: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
@@ -1576,31 +1569,20 @@ impl Filesystem for MergerFS {
         };
 
         let path = Path::new(&inode_data.path);
-        
-        // Remove xattr from all branches that have the file
-        let mut found_any = false;
-        for branch in &self.file_manager.branches {
-            if !branch.allows_create() {
-                continue;
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(EINVAL);
+                return;
             }
-            
-            let full_path = branch.full_path(path);
-            if full_path.exists() {
-                found_any = true;
-                #[cfg(target_os = "linux")]
-                {
-                    // This is a placeholder - proper implementation would use xattr syscalls
-                    reply.error(ENOSYS);
-                    return;
-                }
-            }
-        }
+        };
         
-        if found_any {
-            #[cfg(not(target_os = "linux"))]
-            reply.error(ENOSYS);
-        } else {
-            reply.error(ENOENT);
+        match self.xattr_manager.remove_xattr(path, name_str) {
+            Ok(_) => reply.ok(),
+            Err(XattrError::NotFound) => reply.error(61), // ENOATTR
+            Err(XattrError::PermissionDenied) => reply.error(EACCES),
+            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
+            Err(_) => reply.error(EIO),
         }
     }
 

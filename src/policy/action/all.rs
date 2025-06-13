@@ -11,6 +11,15 @@ impl AllActionPolicy {
     pub fn new() -> Self {
         Self
     }
+    
+    // Add execute method for compatibility with xattr operations
+    pub fn execute(
+        &self,
+        branches: &[Arc<Branch>],
+        path: &Path,
+    ) -> Result<Vec<Arc<Branch>>, PolicyError> {
+        self.select_branches(branches, path)
+    }
 }
 
 impl ActionPolicy for AllActionPolicy {

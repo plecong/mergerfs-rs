@@ -119,6 +119,19 @@ All 60+ tests pass on Alpine Linux environments. The implementation avoids glibc
 
 - When adding a new feature or change, compare the new feature or change in Rust with the current C++ implementation found under `docs/mergerfs-original`
 
+## Development Process for New Features
+
+The development process for any new feature should be:
+- Analyze current C++ implementation under `docs/mergerfs-original`
+- Document the design of the C++ implementation in detail (even pseudocode) as a new Markdown document 
+- Plan the implementation in Rust being sure to not use unsafe Rust code or glibc/libc calls and be cross-platform
+- Write unit tests
+- Write external Python based end-to-end integration tests including updating property-based and fuzz test harness for new functionality found under `python_tests`
+- Run all tests both Rust unit and Python integration tests
+- Update the IMPLEMENTATION_STATUS.md with any left over items based on the implementation that are sub-optimal or not production ready (e.g., implemented for initial testing)
+- Clean up all Rust compilation warnings
+- Commit all changes
+
 ## Test Development Workflow
 - After implementing a new feature, update the Python based tests for new functionality with positive and negative tests and run.
 
