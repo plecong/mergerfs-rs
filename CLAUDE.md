@@ -117,12 +117,12 @@ All 60+ tests pass on Alpine Linux environments. The implementation avoids glibc
 
 ## Development Guidelines
 
-- When adding a new feature or change, compare the new feature or change in Rust with the current C++ implementation found under `docs/mergerfs-original`
+- When adding a new feature or change, compare the new feature or change in Rust with the current C++ implementation found under `refs/mergerfs-original`
 
 ## Development Process for New Features
 
 The development process for any new feature should be:
-- Analyze current C++ implementation under `docs/mergerfs-original`
+- Analyze current C++ implementation under `refs/mergerfs-original`
 - Document the design of the C++ implementation in detail (even pseudocode) as a new Markdown document 
 - Plan the implementation in Rust being sure to not use unsafe Rust code or glibc/libc calls and be cross-platform
 - Write unit tests
