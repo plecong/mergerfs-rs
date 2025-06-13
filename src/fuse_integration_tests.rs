@@ -898,4 +898,104 @@ mod fuse_integration_tests {
         assert!(!temp1.path().join("lfs_test.txt").exists(), "LFS should not use temp1");
         assert!(!temp2.path().join("lfs_test.txt").exists(), "LFS should not use temp2");
     }
+
+    #[test]
+    #[serial]
+    fn test_fuse_file_handle_tracking() {
+        let (_temp_dirs, mut fs) = setup_test_mergerfs();
+        
+        // Create a test file
+        let test_path = Path::new("/test_handles.txt");
+        let test_content = b"Test file for handle tracking";
+        fs.file_manager.create_file(test_path, test_content).unwrap();
+        
+        // Simulate opening the file multiple times
+        let ino = 2; // Assuming this is the inode for our file
+        let flags = 0; // O_RDONLY
+        
+        // Track file handles
+        let initial_count = fs.file_handle_manager.get_handle_count();
+        assert_eq!(initial_count, 0, "Should start with no file handles");
+        
+        // Open file first time
+        let fh1 = fs.file_handle_manager.create_handle(
+            ino,
+            test_path.to_path_buf(),
+            flags,
+            Some(0) // Branch 0
+        );
+        assert_eq!(fs.file_handle_manager.get_handle_count(), 1);
+        
+        // Open file second time
+        let fh2 = fs.file_handle_manager.create_handle(
+            ino,
+            test_path.to_path_buf(),
+            flags,
+            Some(0) // Same branch
+        );
+        assert_ne!(fh1, fh2, "Each open should get unique handle");
+        assert_eq!(fs.file_handle_manager.get_handle_count(), 2);
+        
+        // Verify handles contain correct information
+        let handle1 = fs.file_handle_manager.get_handle(fh1).unwrap();
+        assert_eq!(handle1.ino, ino);
+        assert_eq!(handle1.path, test_path);
+        assert_eq!(handle1.branch_idx, Some(0));
+        
+        // Release first handle
+        fs.file_handle_manager.remove_handle(fh1);
+        assert_eq!(fs.file_handle_manager.get_handle_count(), 1);
+        assert!(fs.file_handle_manager.get_handle(fh1).is_none());
+        
+        // Second handle should still be valid
+        assert!(fs.file_handle_manager.get_handle(fh2).is_some());
+        
+        // Release second handle
+        fs.file_handle_manager.remove_handle(fh2);
+        assert_eq!(fs.file_handle_manager.get_handle_count(), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn test_fuse_file_handle_branch_affinity() {
+        let (_temp_dirs, mut fs) = setup_test_mergerfs();
+        
+        // Create a file that exists in multiple branches
+        let test_path = Path::new("/multi_branch.txt");
+        let content1 = b"Content in branch 1";
+        let content2 = b"Different content in branch 2";
+        
+        // Manually create file in both branches
+        let branch1 = &fs.file_manager.branches[0];
+        let branch2 = &fs.file_manager.branches[1];
+        
+        std::fs::write(branch1.full_path(test_path), content1).unwrap();
+        std::fs::write(branch2.full_path(test_path), content2).unwrap();
+        
+        // Open from specific branches
+        let fh_branch1 = fs.file_handle_manager.create_handle(
+            2,
+            test_path.to_path_buf(),
+            0,
+            Some(0) // Branch 0
+        );
+        
+        let fh_branch2 = fs.file_handle_manager.create_handle(
+            2,
+            test_path.to_path_buf(),
+            0,
+            Some(1) // Branch 1
+        );
+        
+        // Verify handles track their branches
+        let handle1 = fs.file_handle_manager.get_handle(fh_branch1).unwrap();
+        assert_eq!(handle1.branch_idx, Some(0));
+        
+        let handle2 = fs.file_handle_manager.get_handle(fh_branch2).unwrap();
+        assert_eq!(handle2.branch_idx, Some(1));
+        
+        // Clean up
+        fs.file_handle_manager.remove_handle(fh_branch1);
+        fs.file_handle_manager.remove_handle(fh_branch2);
+    }
 }

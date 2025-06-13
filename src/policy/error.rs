@@ -23,4 +23,14 @@ impl PolicyError {
             PolicyError::IoError(e) => e.raw_os_error().unwrap_or(EIO),
         }
     }
+    
+    pub fn from_errno(errno: i32) -> Self {
+        // Standard errno constants compatible with MUSL
+        const EROFS: i32 = 30;
+        
+        match errno {
+            EROFS => PolicyError::ReadOnlyFilesystem,
+            _ => PolicyError::IoError(std::io::Error::from_raw_os_error(errno)),
+        }
+    }
 }

@@ -3,6 +3,7 @@ mod config;
 mod policy;
 mod metadata_ops;
 mod file_ops;
+mod file_handle;
 mod fuse_fs;
 mod integration_tests;
 mod fuse_integration_tests;

@@ -2,6 +2,7 @@ use crate::config::{Config, ConfigRef, StatFSMode, StatFSIgnore};
 use crate::policy::{AllActionPolicy, PolicyError};
 use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
+use crate::file_handle::{FileHandleManager, FileHandle};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
     ReplyOpen, ReplyWrite, Request,
@@ -17,10 +18,10 @@ const ENOTEMPTY: i32 = 39;
 const ENOSYS: i32 = 38;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -28,6 +29,7 @@ pub struct MergerFS {
     pub file_manager: Arc<FileManager>,
     pub metadata_manager: Arc<MetadataManager>,
     pub config: ConfigRef,
+    pub file_handle_manager: Arc<FileHandleManager>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
 }
@@ -77,6 +79,7 @@ impl MergerFS {
             file_manager: Arc::new(file_manager),
             metadata_manager: Arc::new(metadata_manager),
             config,
+            file_handle_manager: Arc::new(FileHandleManager::new()),
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
         }
@@ -207,7 +210,29 @@ impl Filesystem for MergerFS {
         match self.get_inode_data(ino) {
             Some(data) => {
                 if data.attr.kind == FileType::RegularFile {
-                    reply.opened(0, 0);
+                    let path = Path::new(&data.path);
+                    
+                    // Find which branch has the file
+                    let mut branch_idx = None;
+                    for (idx, branch) in self.file_manager.branches.iter().enumerate() {
+                        if branch.full_path(path).exists() {
+                            branch_idx = Some(idx);
+                            break;
+                        }
+                    }
+                    
+                    // Create file handle
+                    let fh = self.file_handle_manager.create_handle(
+                        ino,
+                        PathBuf::from(&data.path),
+                        flags,
+                        branch_idx
+                    );
+                    
+                    // TODO: Check if O_DIRECT is requested and set appropriate flags
+                    let open_flags = 0;
+                    
+                    reply.opened(fh, open_flags);
                 } else {
                     reply.error(ENOTDIR);
                 }
@@ -220,39 +245,95 @@ impl Filesystem for MergerFS {
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         size: u32,
         _flags: i32,
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        debug!("read: ino={}, offset={}, size={}", ino, offset, size);
+        debug!("read: ino={}, fh={}, offset={}, size={}", ino, fh, offset, size);
 
-        let data = match self.get_inode_data(ino) {
-            Some(data) => data,
+        // Get the file handle
+        let handle = match self.file_handle_manager.get_handle(fh) {
+            Some(h) => h,
             None => {
-                reply.error(ENOENT);
+                // Fallback to reading without handle for compatibility
+                let data = match self.get_inode_data(ino) {
+                    Some(data) => data,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                
+                let path = Path::new(&data.path);
+                match self.file_manager.read_file(path) {
+                    Ok(content) => {
+                        let start = offset as usize;
+                        let end = std::cmp::min(start + size as usize, content.len());
+                        
+                        if start >= content.len() {
+                            reply.data(&[]);
+                        } else {
+                            reply.data(&content[start..end]);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read file {}: {:?}", data.path, e);
+                        reply.error(ENOENT);
+                    }
+                }
                 return;
             }
         };
 
-        let path = Path::new(&data.path);
-        match self.file_manager.read_file(path) {
-            Ok(content) => {
-                let start = offset as usize;
-                let end = std::cmp::min(start + size as usize, content.len());
-                
-                if start >= content.len() {
-                    reply.data(&[]);
-                } else {
-                    reply.data(&content[start..end]);
+        // Use the file handle's path
+        let path = Path::new(&handle.path);
+        
+        // If we know which branch, read from that specific branch
+        let content = if let Some(branch_idx) = handle.branch_idx {
+            if branch_idx < self.file_manager.branches.len() {
+                let branch = &self.file_manager.branches[branch_idx];
+                let full_path = branch.full_path(path);
+                match std::fs::read(&full_path) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("Failed to read file from branch {}: {:?}", branch_idx, e);
+                        reply.error(ENOENT);
+                        return;
+                    }
+                }
+            } else {
+                // Fallback to normal read
+                match self.file_manager.read_file(path) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("Failed to read file: {:?}", e);
+                        reply.error(ENOENT);
+                        return;
+                    }
                 }
             }
-            Err(e) => {
-                error!("Failed to read file {}: {:?}", data.path, e);
-                reply.error(ENOENT);
+        } else {
+            // Fallback to normal read
+            match self.file_manager.read_file(path) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Failed to read file: {:?}", e);
+                    reply.error(ENOENT);
+                    return;
+                }
             }
+        };
+
+        let start = offset as usize;
+        let end = std::cmp::min(start + size as usize, content.len());
+        
+        if start >= content.len() {
+            reply.data(&[]);
+        } else {
+            reply.data(&content[start..end]);
         }
     }
 
@@ -396,7 +477,7 @@ impl Filesystem for MergerFS {
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         data: &[u8],
         _write_flags: u32,
@@ -404,21 +485,71 @@ impl Filesystem for MergerFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        info!("write: ino={}, offset={}, len={}", ino, offset, data.len());
+        info!("write: ino={}, fh={}, offset={}, len={}", ino, fh, offset, data.len());
 
-        let inode_data = match self.get_inode_data(ino) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let path = Path::new(&inode_data.path);
+        // Try to get file handle first
+        let handle = self.file_handle_manager.get_handle(fh);
         
-        // Write to the file at the specified offset
-        let result = self.file_manager.write_to_file(path, offset as u64, data)
-            .map(|_| ());
+        // Get the path - either from handle or inode
+        let (path_buf, branch_idx) = if let Some(h) = &handle {
+            (h.path.clone(), h.branch_idx)
+        } else {
+            // Fallback to using inode data
+            let inode_data = match self.get_inode_data(ino) {
+                Some(data) => data,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+            (PathBuf::from(&inode_data.path), None)
+        };
+        
+        let path = path_buf.as_path();
+        
+        // If we have a file handle with a specific branch, write to that branch
+        let result = if let Some(branch_idx) = branch_idx {
+                if branch_idx < self.file_manager.branches.len() {
+                    let branch = &self.file_manager.branches[branch_idx];
+                    if branch.allows_create() {
+                        let full_path = branch.full_path(path);
+                        
+                        // Write directly to the specific branch
+                        use std::fs::OpenOptions;
+                        use std::io::{Seek, SeekFrom, Write};
+                        
+                        match OpenOptions::new()
+                            .write(true)
+                            .open(&full_path) {
+                            Ok(mut file) => {
+                                match file.seek(SeekFrom::Start(offset as u64)) {
+                                    Ok(_) => {
+                                        match file.write_all(data) {
+                                            Ok(_) => {
+                                                let _ = file.sync_all();
+                                                Ok(())
+                                            }
+                                            Err(e) => Err(PolicyError::IoError(e))
+                                        }
+                                    }
+                                    Err(e) => Err(PolicyError::IoError(e))
+                                }
+                            }
+                            Err(e) => Err(PolicyError::IoError(e))
+                        }
+                    } else {
+                        Err(PolicyError::from_errno(EROFS))
+                    }
+                } else {
+                    // Fallback to normal write
+                    self.file_manager.write_to_file(path, offset as u64, data)
+                        .map(|_| ())
+                }
+        } else {
+            // No specific branch, use normal write
+            self.file_manager.write_to_file(path, offset as u64, data)
+                .map(|_| ())
+        };
 
         match result {
             Ok(_) => {
@@ -1233,15 +1364,21 @@ impl Filesystem for MergerFS {
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        info!("release: ino={}", ino);
-        // Clean up any resources associated with the file handle
-        // For now, we don't track file handles, so this is a no-op
+        info!("release: ino={}, fh={}", ino, fh);
+        
+        // Remove the file handle
+        if let Some(handle) = self.file_handle_manager.remove_handle(fh) {
+            debug!("Released file handle {} for path {:?}", fh, handle.path);
+        } else {
+            warn!("Attempted to release unknown file handle: {}", fh);
+        }
+        
         reply.ok();
     }
 
