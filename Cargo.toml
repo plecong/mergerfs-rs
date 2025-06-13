@@ -1,0 +1,19 @@
+[package]
+name = "mergerfs-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fuser = "0.14"
+# Removed libc dependency for better MUSL/Alpine compatibility
+parking_lot = "0.12"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+time = { version = "0.3", features = ["macros"] }
+# Use filetime for portable timestamp operations
+filetime = "0.2"
+
+[dev-dependencies]
+tempfile = "3.0"
+serial_test = "3.0"
