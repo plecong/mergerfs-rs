@@ -79,7 +79,7 @@ mod fuse_integration_tests {
         // Test 4: File attributes should be correct
         for (filename, content) in &files_to_create {
             let path = Path::new(filename);
-            let attr = fs.create_file_attr(path, false);
+            let attr = fs.create_file_attr(path);
             assert!(attr.is_some(), "Should be able to create attributes for {}", filename);
             
             let attr = attr.unwrap();
@@ -169,7 +169,7 @@ mod fuse_integration_tests {
         // Test file attributes for nested files
         for file_path in &nested_files {
             let path = Path::new(file_path);
-            let attr = fs.create_file_attr(path, false);
+            let attr = fs.create_file_attr(path);
             assert!(attr.is_some(), "Should be able to create attributes for nested file {}", file_path);
             
             let attr = attr.unwrap();
@@ -201,7 +201,7 @@ mod fuse_integration_tests {
         assert_eq!(content, readonly_content, "Content from readonly branch should match");
 
         // Test that we can create attributes for the readonly file
-        let attr = fs.create_file_attr(path, false);
+        let attr = fs.create_file_attr(path);
         assert!(attr.is_some(), "Should be able to create attributes for readonly file");
         
         let attr = attr.unwrap();
@@ -288,7 +288,7 @@ mod fuse_integration_tests {
         assert_eq!(read_content, large_content.as_bytes(), "Large file content should match");
 
         // Test file attributes for large file
-        let attr = fs.create_file_attr(path, false);
+        let attr = fs.create_file_attr(path);
         assert!(attr.is_some(), "Should be able to create attributes for large file");
         
         let attr = attr.unwrap();

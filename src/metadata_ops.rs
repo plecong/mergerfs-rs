@@ -179,7 +179,7 @@ impl MetadataManager {
 
 
     fn get_metadata_single(&self, path: &Path) -> Result<FileMetadata, PolicyError> {
-        let metadata = std::fs::metadata(path)?;
+        let metadata = std::fs::symlink_metadata(path)?;
         
         #[cfg(unix)]
         {

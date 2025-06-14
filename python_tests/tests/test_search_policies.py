@@ -125,9 +125,8 @@ class TestSearchPolicies:
         
         assert mount_real.exists()
         assert mount_link.exists()
-        # Note: mergerfs-rs currently follows symlinks, so the link appears as a regular file
-        # This is a known limitation - symlink metadata is not preserved through FUSE
-        assert mount_link.read_text() == "real content"
+        # mergerfs-rs now properly detects symlinks
+        assert mount_link.is_symlink()
     
     def test_search_performance_many_files(self, mounted_fs):
         """Test that search performs well with many files."""

@@ -136,6 +136,17 @@ impl FileManager {
         })
     }
 
+    /// Get metadata for a path without following symlinks
+    pub fn get_metadata(&self, path: &Path) -> Option<std::fs::Metadata> {
+        for branch in &self.branches {
+            let full_path = branch.full_path(path);
+            if let Ok(metadata) = std::fs::symlink_metadata(&full_path) {
+                return Some(metadata);
+            }
+        }
+        None
+    }
+
     /// Search for a path using the configured search policy
     pub fn search_path(&self, path: &Path) -> Result<Vec<Arc<Branch>>, PolicyError> {
         self.search_policy.search_branches(&self.branches, path)

@@ -122,33 +122,32 @@ impl MergerFS {
         None
     }
 
-    pub fn create_file_attr(&self, path: &Path, is_dir: bool) -> Option<FileAttr> {
-        // Check if path exists in any branch
-        if is_dir {
-            // For directories, use the directory_exists check
-            if !self.file_manager.directory_exists(path) {
-                return None;
-            }
-        } else {
-            // For files, use search policy
-            if !self.file_manager.file_exists_search(path) {
-                return None;
-            }
-        }
-
+    pub fn create_file_attr(&self, path: &Path) -> Option<FileAttr> {
+        // Get metadata without following symlinks
+        let metadata = self.file_manager.get_metadata(path)?;
+        
         let now = SystemTime::now();
-        let file_type = if is_dir { FileType::Directory } else { FileType::RegularFile };
-        let perm = if is_dir { 0o755 } else { 0o644 };
-        let nlink = if is_dir { 2 } else { 1 };
-
-        // Try to get actual file size for regular files
-        let size = if !is_dir {
-            self.file_manager.read_file(path)
-                .map(|content| content.len() as u64)
-                .unwrap_or(0)
+        
+        // Determine file type based on metadata
+        let file_type = if metadata.is_dir() {
+            FileType::Directory
+        } else if metadata.is_symlink() {
+            FileType::Symlink
         } else {
-            0
+            FileType::RegularFile
         };
+        
+        // Set permissions based on metadata
+        #[cfg(unix)]
+        let perm = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.mode() as u16 & 0o777
+        };
+        #[cfg(not(unix))]
+        let perm = if metadata.permissions().readonly() { 0o444 } else { 0o644 };
+        
+        let nlink = if metadata.is_dir() { 2 } else { 1 };
+        let size = metadata.len();
 
         Some(FileAttr {
             ino: 0, // Will be set by caller
@@ -230,11 +229,8 @@ impl Filesystem for MergerFS {
         // Try to create attributes for this path
         let path = Path::new(&child_path);
         
-        // Check if it's a directory first
-        let is_dir = self.file_manager.directory_exists(path);
-        
         // Try to create attributes (check if file/dir exists)
-        if let Some(mut attr) = self.create_file_attr(path, is_dir) {
+        if let Some(mut attr) = self.create_file_attr(path) {
             let ino = self.allocate_inode();
             attr.ino = ino;
 
@@ -533,7 +529,7 @@ impl Filesystem for MergerFS {
         match self.file_manager.create_file(path, &[]) {
             Ok(_) => {
                 // Create file attributes
-                if let Some(mut attr) = self.create_file_attr(path, false) {
+                if let Some(mut attr) = self.create_file_attr(path) {
                     let ino = self.allocate_inode();
                     attr.ino = ino;
 
@@ -698,7 +694,7 @@ impl Filesystem for MergerFS {
         match self.file_manager.create_directory(path) {
             Ok(_) => {
                 // Create directory attributes
-                if let Some(mut attr) = self.create_file_attr(path, true) {
+                if let Some(mut attr) = self.create_file_attr(path) {
                     let ino = self.allocate_inode();
                     attr.ino = ino;
 
@@ -939,7 +935,7 @@ impl Filesystem for MergerFS {
 
         if had_success || (mode.is_none() && uid.is_none() && gid.is_none() && size.is_none() && atime.is_none() && mtime.is_none()) {
             // Get updated attributes and return them
-            match self.create_file_attr(path, inode_data.attr.kind == FileType::Directory) {
+            match self.create_file_attr(path) {
                 Some(mut new_attr) => {
                     new_attr.ino = ino;
                     
@@ -1765,7 +1761,7 @@ impl Filesystem for MergerFS {
             let path = Path::new(&file_path);
             match self.file_manager.create_file(path, &[]) {
                 Ok(_) => {
-                    if let Some(mut attr) = self.create_file_attr(path, false) {
+                    if let Some(mut attr) = self.create_file_attr(path) {
                         let ino = self.allocate_inode();
                         attr.ino = ino;
                         attr.perm = (mode & 0o7777) as u16;
@@ -1883,7 +1879,7 @@ mod tests {
         fs.file_manager.create_file(Path::new("test.txt"), test_content).unwrap();
         
         // Test creating attributes for existing file
-        let attr = fs.create_file_attr(Path::new("test.txt"), false);
+        let attr = fs.create_file_attr(Path::new("test.txt"));
         assert!(attr.is_some());
         
         let attr = attr.unwrap();
@@ -1891,7 +1887,7 @@ mod tests {
         assert_eq!(attr.size, test_content.len() as u64);
         
         // Test creating attributes for non-existing file
-        let attr = fs.create_file_attr(Path::new("nonexistent.txt"), false);
+        let attr = fs.create_file_attr(Path::new("nonexistent.txt"));
         assert!(attr.is_none());
     }
 
@@ -1934,7 +1930,7 @@ mod tests {
         assert!(fs.file_manager.file_exists(path));
         
         // Verify we can create attributes for it
-        let attr = fs.create_file_attr(path, false);
+        let attr = fs.create_file_attr(path);
         assert!(attr.is_some());
         
         let attr = attr.unwrap();
@@ -1951,7 +1947,7 @@ mod tests {
         fs.file_manager.create_file(path, b"initial").unwrap();
         
         // Create an inode for it
-        let mut attr = fs.create_file_attr(path, false).unwrap();
+        let mut attr = fs.create_file_attr(path).unwrap();
         let ino = fs.allocate_inode();
         attr.ino = ino;
         
@@ -2000,7 +1996,7 @@ mod tests {
         fs.file_manager.create_file(path, content).unwrap();
         
         // Test that we can create attributes for existing file
-        let attr = fs.create_file_attr(path, false);
+        let attr = fs.create_file_attr(path);
         assert!(attr.is_some());
         
         let attr = attr.unwrap();
@@ -2010,7 +2006,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
         
         // Test that non-existing file returns None
-        let missing_attr = fs.create_file_attr(std::path::Path::new("missing.txt"), false);
+        let missing_attr = fs.create_file_attr(std::path::Path::new("missing.txt"));
         assert!(missing_attr.is_none());
     }
 }
