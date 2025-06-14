@@ -13,10 +13,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 17 of 40+ implemented (42%)
+- **FUSE Operations**: 18 of 40+ implemented (45%)
 - **Policies**: 7 of 36 implemented (19%)
 - **Special Features**: 2 of 10+ implemented (20%)
-- **Test Coverage**: 76 tests passing
+- **Test Coverage**: 96 tests passing
 
 ## Implementation Status by Component
 
@@ -29,7 +29,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Error handling with proper errno mapping
 - [x] Alpine Linux/MUSL compatibility (no libc dependency)
 
-#### FUSE Operations (17/40+)
+#### FUSE Operations (18/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -46,6 +46,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `statfs` - Get filesystem statistics
 - [x] `release` - Close file handles
 - [x] `getxattr`/`setxattr`/`listxattr`/`removexattr` - Extended attributes
+- [x] `rename` - Rename files and directories (with multi-branch support)
 
 #### Policies (7/36)
 **Create Policies (4/16)**:
@@ -73,7 +74,6 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ### 🚧 In Progress / High Priority
 
 #### FUSE Operations
-- [ ] `rename` - Move/rename files (HIGH)
 - [ ] `symlink` - Create symbolic links (HIGH)
 - [ ] `readlink` - Read symbolic links (HIGH)
 - [ ] `link` - Create hard links (HIGH)
@@ -123,10 +123,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Implementation Priorities
 
 ### Phase 1: Core Compatibility (Current Focus)
-1. **Essential FUSE operations**: rename, symlink, link operations
-2. **ioctl for runtime configuration**: Critical for mergerfs compatibility
-3. **Search policy `all`**: Required for many use cases
-4. **Create policy `epmfs`**: Common balanced distribution policy
+1. **Essential FUSE operations**: symlink, link operations
+2. **Search policy `all`**: Required for many use cases
+3. **Create policy `epmfs`**: Common balanced distribution policy
 
 ### Phase 2: Enhanced Functionality
 1. **moveonenospc**: Automatic file migration on ENOSPC
