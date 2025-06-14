@@ -78,9 +78,9 @@ def main():
     parser = argparse.ArgumentParser(description="Run mergerfs-rs Python tests")
     parser.add_argument(
         "--test-type", 
-        choices=["all", "unit", "integration", "policy", "property", "concurrent", "fuzz", "stress"],
+        choices=["all", "unit", "integration", "policy", "property", "concurrent", "fuzz", "stress", "quick", "full"],
         default="all",
-        help="Type of tests to run"
+        help="Type of tests to run (quick excludes slow tests, full includes everything)"
     )
     parser.add_argument(
         "--policy",
@@ -136,7 +136,13 @@ def main():
     pytest_args = []
     
     # Add test type marker
-    if args.test_type != "all":
+    if args.test_type == "quick":
+        # Quick tests exclude slow property-based and fuzz tests
+        pytest_args.extend(["-m", "not slow and not property and not fuzz"])
+    elif args.test_type == "full":
+        # Full tests include everything but with extended timeouts
+        pytest_args.extend(["-c", "pytest-full.ini"])
+    elif args.test_type != "all":
         pytest_args.extend(["-m", args.test_type])
     
     # Add verbose flag
@@ -170,6 +176,34 @@ def quick_test():
         "-v",
         "-m", "policy",
         "-k", "test_firstfound_policy_basic",
+        "--tb=short"
+    ])
+
+
+def run_quick_suite():
+    """Run quick test suite excluding slow tests."""
+    print("Running quick test suite (excluding slow property-based and fuzz tests)...")
+    
+    if not ensure_binary_exists():
+        return 1
+    
+    return run_pytest([
+        "-v",
+        "-m", "not slow and not property and not fuzz",
+        "--tb=short"
+    ])
+
+
+def run_full_suite():
+    """Run full test suite with extended timeouts."""
+    print("Running full test suite (including all slow tests)...")
+    
+    if not ensure_binary_exists():
+        return 1
+    
+    return run_pytest([
+        "-v",
+        "-c", "pytest-full.ini",
         "--tb=short"
     ])
 
@@ -210,7 +244,9 @@ def run_all_tests():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "quick":
-        sys.exit(quick_test())
+        sys.exit(run_quick_suite())
+    elif len(sys.argv) > 1 and sys.argv[1] == "full":
+        sys.exit(run_full_suite())
     elif len(sys.argv) > 1 and sys.argv[1] == "all":
         sys.exit(run_all_tests())
     else:

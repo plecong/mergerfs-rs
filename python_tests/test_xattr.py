@@ -181,6 +181,7 @@ class TestXattr(MergerFSTestBase):
                 xattr.removexattr(test_file, attr_name)
             assert exc_info.value.errno == 13  # EACCES
     
+    @pytest.mark.slow
     @given(
         attr_names=st.lists(
             st.text(min_size=1, max_size=100).map(lambda s: f"user.{s}".encode()),

@@ -26,12 +26,21 @@ The testing framework includes:
    uv sync
    ```
 
-2. **Run a quick verification test**:
+2. **Run quick tests** (excludes slow property-based and fuzz tests):
    ```bash
    python run_tests.py quick
+   # or
+   python run_tests.py --test-type quick
    ```
 
-3. **Run all tests**:
+3. **Run full test suite** (includes all tests with extended timeouts):
+   ```bash
+   python run_tests.py full
+   # or
+   python run_tests.py --test-type full
+   ```
+
+4. **Run all tests sequentially** (in order of complexity):
    ```bash
    python run_tests.py all
    ```
@@ -69,7 +78,7 @@ Test that create policies work correctly:
 python run_tests.py --test-type policy
 ```
 
-### Property-based Tests (`-m property`)
+### Property-based Tests (`-m property`) ⚠️ **SLOW**
 
 Use Hypothesis to generate random filesystem operations and verify:
 - Policy consistency across random file operations
@@ -80,6 +89,8 @@ Use Hypothesis to generate random filesystem operations and verify:
 ```bash
 python run_tests.py --test-type property
 ```
+
+**Note**: Property-based tests are marked with `@pytest.mark.slow` and excluded from quick test runs.
 
 ### Concurrent Access Tests (`-m concurrent`)
 
@@ -93,7 +104,7 @@ Test filesystem behavior under concurrent access:
 python run_tests.py --test-type concurrent
 ```
 
-### Fuzz Testing (`-m fuzz`)
+### Fuzz Testing (`-m fuzz`) ⚠️ **SLOW**
 
 Structured fuzz testing with:
 - Random operation generation
@@ -105,11 +116,52 @@ Structured fuzz testing with:
 python run_tests.py --test-type fuzz
 ```
 
+**Note**: Fuzz tests are marked with `@pytest.mark.slow` and excluded from quick test runs.
+
+## Test Organization
+
+### Quick Tests vs Full Tests
+
+To improve developer productivity, tests are organized into two main categories:
+
+1. **Quick Tests** (`python run_tests.py quick`):
+   - Excludes property-based tests (`-m property`)
+   - Excludes fuzz tests (`-m fuzz`)
+   - Excludes any test marked with `@pytest.mark.slow`
+   - Uses default 30-second timeout
+   - Ideal for rapid development feedback
+
+2. **Full Tests** (`python run_tests.py full`):
+   - Includes all tests
+   - Uses extended 120-second timeout per test
+   - Runs property-based and fuzz tests
+   - Ideal for comprehensive validation before commits
+
+### Test Marks
+
+Tests are marked with pytest marks for organization:
+- `@pytest.mark.unit` - Unit tests
+- `@pytest.mark.integration` - Integration tests
+- `@pytest.mark.policy` - Policy-specific tests
+- `@pytest.mark.property` - Property-based tests (slow)
+- `@pytest.mark.fuzz` - Fuzz tests (slow)
+- `@pytest.mark.slow` - Any slow-running test
+- `@pytest.mark.concurrent` - Concurrent access tests
+- `@pytest.mark.stress` - Stress tests
+
 ## Test Runner Options
 
 The `run_tests.py` script provides several options:
 
 ```bash
+# Quick tests (excludes slow property-based and fuzz tests)
+python run_tests.py quick
+python run_tests.py --test-type quick
+
+# Full test suite with extended timeouts
+python run_tests.py full
+python run_tests.py --test-type full
+
 # Test specific policy only
 python run_tests.py --policy mfs
 
@@ -125,11 +177,29 @@ python run_tests.py --build
 # Pass additional pytest arguments
 python run_tests.py --test-type policy --verbose -- --tb=short
 
-# Quick verification
-python run_tests.py quick
-
-# Complete test suite
+# Complete test suite (runs tests sequentially)
 python run_tests.py all
+```
+
+### Using Custom Pytest Configurations
+
+The framework includes multiple pytest configurations:
+
+1. **Default** (`pyproject.toml`): Standard configuration with 30s timeout
+2. **Quick mode** (`pytest-quick.ini`): Excludes slow tests, 10s timeout
+3. **Full mode** (`pytest-full.ini`): Includes all tests, 120s timeout
+
+You can also run pytest directly with specific configurations:
+
+```bash
+# Run with quick configuration
+uv run pytest -c pytest-quick.ini
+
+# Run with full configuration  
+uv run pytest -c pytest-full.ini
+
+# Run specific test marks
+uv run pytest -m "not slow"
 ```
 
 ## How It Works

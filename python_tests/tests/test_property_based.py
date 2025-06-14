@@ -61,6 +61,7 @@ file_sizes = st.integers(min_value=100, max_value=10000)
 
 @pytest.mark.property
 @pytest.mark.integration
+@pytest.mark.slow
 class TestPolicyProperties:
     """Property-based tests for policy behavior."""
     
@@ -211,6 +212,7 @@ class TestPolicyProperties:
                 assert dir_locations == file_locations, f"File should be in same branch as directory"
 
 
+@pytest.mark.slow
 class PolicyStateMachine(RuleBasedStateMachine):
     """Stateful property-based testing for policy behavior.
     
@@ -298,6 +300,7 @@ class PolicyStateMachine(RuleBasedStateMachine):
 
 @pytest.mark.property
 @pytest.mark.integration
+@pytest.mark.slow
 class TestFileSystemProperties:
     """Property-based tests for general filesystem behavior."""
     

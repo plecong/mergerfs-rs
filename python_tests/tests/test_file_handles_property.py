@@ -45,6 +45,7 @@ class FileHandle:
     is_open: bool = True
 
 
+@pytest.mark.slow
 class FileHandleStateMachine(RuleBasedStateMachine):
     """
     Stateful testing for file handle operations.
@@ -309,6 +310,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
 
 # Specific property tests
 
+@pytest.mark.slow
 @given(
     num_handles=st.integers(min_value=1, max_value=5),
     content=st.text(min_size=1, max_size=50)
@@ -356,6 +358,7 @@ def test_concurrent_read_handles(num_handles: int, content: str):
             print(f"Warning: Failed to cleanup in test: {e}")
 
 
+@pytest.mark.slow
 @given(
     filename=st.text(
         alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), min_codepoint=97, max_codepoint=122),
@@ -407,12 +410,13 @@ def test_handle_persistence(filename: str, iterations: int):
 
 
 # Run the state machine test
-TestFileHandles = FileHandleStateMachine.TestCase
-TestFileHandles.settings = settings(
-    max_examples=10,
-    stateful_step_count=10,
-    deadline=2000
-)
+@pytest.mark.slow
+class TestFileHandles(FileHandleStateMachine.TestCase):
+    settings = settings(
+        max_examples=10,
+        stateful_step_count=10,
+        deadline=2000
+    )
 
 
 if __name__ == "__main__":

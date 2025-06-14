@@ -47,6 +47,7 @@ def get_fs_stats(path: Path) -> Dict[str, int]:
     }
 
 
+@pytest.mark.slow
 class StatFSStateMachine(RuleBasedStateMachine):
     """
     Stateful testing for statfs operations.
@@ -232,6 +233,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
 
 # Specific property tests
 
+@pytest.mark.slow
 @given(
     num_files=st.integers(min_value=0, max_value=10),
     file_sizes=st.lists(
@@ -289,6 +291,7 @@ def test_space_calculation(num_files: int, file_sizes: List[int]):
         manager.cleanup()
 
 
+@pytest.mark.slow
 @given(
     block_sizes=st.lists(
         st.sampled_from([512, 1024, 2048, 4096, 8192]),
@@ -332,12 +335,13 @@ def test_block_size_normalization(block_sizes: List[int]):
 
 
 # Run the state machine test
-TestStatFS = StatFSStateMachine.TestCase
-TestStatFS.settings = settings(
-    max_examples=50,
-    stateful_step_count=30,
-    deadline=15000
-)
+@pytest.mark.slow
+class TestStatFS(StatFSStateMachine.TestCase):
+    settings = settings(
+        max_examples=50,
+        stateful_step_count=30,
+        deadline=15000
+    )
 
 
 if __name__ == "__main__":

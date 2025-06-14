@@ -39,8 +39,10 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "--disable-warnings",
-    "--timeout=30",
 ]
+timeout = 30
+timeout_method = "thread"
+timeout_func_only = true
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
