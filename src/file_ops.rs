@@ -179,6 +179,66 @@ impl FileManager {
         tracing::info!("Symlink created successfully at {:?}", full_link_path);
         Ok(())
     }
+    
+    pub fn create_hard_link(&self, source_path: &Path, link_path: &Path) -> Result<(), PolicyError> {
+        // First, find which branch contains the source file
+        let source_branch = self.find_first_branch(source_path)?;
+        let full_source_path = source_branch.full_path(source_path);
+        
+        // Verify source exists and is a regular file
+        if !full_source_path.exists() || !full_source_path.is_file() {
+            return Err(PolicyError::from(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Source file does not exist or is not a regular file"
+            )));
+        }
+        
+        // For hard links, both source and link must be on the same filesystem/branch
+        // Select the same branch as the source for the hard link
+        let branch = source_branch.clone();
+        
+        if !branch.allows_create() {
+            return Err(PolicyError::from(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Branch is read-only"
+            )));
+        }
+        
+        let full_link_path = branch.full_path(link_path);
+        
+        tracing::info!("Creating hard link {:?} -> {:?} in branch {:?}", source_path, link_path, branch.path);
+        
+        // Find a branch that has the parent directory to use as template for cloning
+        let parent_path = link_path.parent().unwrap_or_else(|| Path::new("/"));
+        let template_branch = self.find_first_branch(parent_path).ok();
+        
+        // Clone parent directory structure from template branch if available
+        if let Some(ref template) = template_branch {
+            if let Some(parent) = link_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    use crate::fs_utils;
+                    if let Err(e) = fs_utils::clone_path(&template.path, &branch.path, parent) {
+                        tracing::warn!("Failed to clone parent path structure: {:?}", e);
+                        // Fall back to simple directory creation
+                        if let Some(parent_dir) = full_link_path.parent() {
+                            std::fs::create_dir_all(parent_dir)?;
+                        }
+                    }
+                }
+            }
+        } else {
+            // No template found, just create parent directories
+            if let Some(parent) = full_link_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        
+        // Create the hard link
+        std::fs::hard_link(&full_source_path, &full_link_path)?;
+        
+        tracing::info!("Hard link created successfully at {:?}", full_link_path);
+        Ok(())
+    }
 
     pub fn directory_exists(&self, path: &Path) -> bool {
         self.branches.iter().any(|branch| {
@@ -435,5 +495,103 @@ mod tests {
         let path2 = branch2.full_path(Path::new("test.txt"));
         assert!(!path1.exists());
         assert!(path2.exists());
+    }
+
+    #[test]
+    fn test_create_hard_link_same_branch() {
+        let (_temp_dirs, branches) = setup_test_branches();
+        let policy = Box::new(FirstFoundCreatePolicy);
+        let file_manager = FileManager::new(branches.clone(), policy);
+        
+        // Create a source file
+        let test_content = b"Hard link test content";
+        file_manager.create_file(Path::new("source.txt"), test_content).unwrap();
+        
+        // Create a hard link to the source file
+        let result = file_manager.create_hard_link(Path::new("source.txt"), Path::new("link.txt"));
+        assert!(result.is_ok());
+        
+        // Verify both files exist in the same branch
+        let source_path = branches[0].full_path(Path::new("source.txt"));
+        let link_path = branches[0].full_path(Path::new("link.txt"));
+        assert!(source_path.exists());
+        assert!(link_path.exists());
+        
+        // Verify they have the same content
+        let source_content = std::fs::read(&source_path).unwrap();
+        let link_content = std::fs::read(&link_path).unwrap();
+        assert_eq!(source_content, link_content);
+        
+        // Verify they have the same inode (on Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let source_meta = std::fs::metadata(&source_path).unwrap();
+            let link_meta = std::fs::metadata(&link_path).unwrap();
+            assert_eq!(source_meta.ino(), link_meta.ino());
+        }
+    }
+
+    #[test]
+    fn test_create_hard_link_nonexistent_source() {
+        let (_temp_dirs, branches) = setup_test_branches();
+        let policy = Box::new(FirstFoundCreatePolicy);
+        let file_manager = FileManager::new(branches, policy);
+        
+        // Try to create a hard link to a non-existent source
+        let result = file_manager.create_hard_link(Path::new("nonexistent.txt"), Path::new("link.txt"));
+        assert!(result.is_err());
+        assert!(matches!(result, Err(PolicyError::NoBranchesAvailable)));
+    }
+
+    #[test]
+    fn test_create_hard_link_with_nested_path() {
+        let (_temp_dirs, branches) = setup_test_branches();
+        let policy = Box::new(FirstFoundCreatePolicy);
+        let file_manager = FileManager::new(branches.clone(), policy);
+        
+        // Create a source file in a nested directory
+        let test_content = b"Nested hard link test";
+        let source_path = Path::new("dir1/source.txt");
+        file_manager.create_file(source_path, test_content).unwrap();
+        
+        // Create a hard link in a different nested directory
+        let link_path = Path::new("dir2/link.txt");
+        let result = file_manager.create_hard_link(source_path, link_path);
+        assert!(result.is_ok());
+        
+        // Verify the link was created correctly
+        let full_link_path = branches[0].full_path(link_path);
+        assert!(full_link_path.exists());
+        
+        // Verify content matches
+        let link_content = std::fs::read(&full_link_path).unwrap();
+        assert_eq!(link_content, test_content);
+    }
+
+    #[test]
+    fn test_create_hard_link_readonly_branch() {
+        let temp1 = TempDir::new().unwrap();
+        let branch1 = Arc::new(Branch::new(temp1.path().to_path_buf(), BranchMode::ReadOnly));
+        
+        let branches = vec![branch1.clone()];
+        let policy = Box::new(FirstFoundCreatePolicy);
+        let file_manager = FileManager::new(branches, policy);
+        
+        // Create a source file manually (since we can't use file_manager with readonly branch)
+        let source_path = branch1.full_path(Path::new("source.txt"));
+        std::fs::write(&source_path, b"test content").unwrap();
+        
+        // Try to create a hard link in the readonly branch
+        let result = file_manager.create_hard_link(Path::new("source.txt"), Path::new("link.txt"));
+        assert!(result.is_err());
+        
+        // Verify it's a permission error
+        match result {
+            Err(PolicyError::IoError(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            _ => panic!("Expected permission denied error"),
+        }
     }
 }

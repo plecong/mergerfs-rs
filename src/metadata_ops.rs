@@ -345,7 +345,8 @@ mod tests {
         ));
 
         let branches = vec![branch1, branch2];
-        let policy = Box::new(crate::policy::ExistingPathAllActionPolicy::new());
+        use crate::policy::action::ExistingPathAllActionPolicy;
+        let policy = Box::new(ExistingPathAllActionPolicy::new());
         let manager = MetadataManager::new(branches, policy);
 
         // Should only operate on the branch where file exists

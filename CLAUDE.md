@@ -124,6 +124,18 @@ The development process for any new feature should be:
 - Regression test everything including unit tests, integration tests, and Python-based tests
 - Update IMPLEMENTATION_STATUS.md with the status of the feature
 
+## Definition of Done
+
+The definition of done is: 
+- Rust code is functional
+- Rust-based unit test coverage of 100%
+- Python-based integration test coverage of 100%
+- All regression tests run
+- C++ implementation is documented using pseudocode
+- Rust implementation differences from C++ implementation are documented
+- All rust compilation warnings are cleared except for future work
+- Code is committed
+
 ## Python Testing
 
 The Python testing framework is located in `python_tests/` and uses:

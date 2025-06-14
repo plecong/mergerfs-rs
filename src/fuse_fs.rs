@@ -1344,54 +1344,31 @@ impl Filesystem for MergerFS {
             format!("{}/{}", newparent_data.path, newname_str)
         };
 
-        // Find which branch has the source file
-        let mut source_branch = None;
-        for branch in &self.file_manager.branches {
-            let full_source = branch.full_path(source_path);
-            if full_source.exists() && full_source.is_file() {
-                source_branch = Some(branch);
-                break;
+        // Use FileManager to create the hard link
+        match self.file_manager.create_hard_link(source_path, Path::new(&link_path)) {
+            Ok(_) => {
+                // Update the existing inode's link count
+                let mut inodes = self.inodes.write();
+                if let Some(data) = inodes.get_mut(&ino) {
+                    data.attr.nlink += 1;
+                }
+                
+                // Return the existing inode attributes
+                reply.entry(&TTL, &inode_data.attr, 0);
             }
-        }
-
-        match source_branch {
-            Some(branch) => {
-                if !branch.allows_create() {
-                    reply.error(EROFS);
-                    return;
-                }
-
-                let full_source = branch.full_path(source_path);
-                let full_link = branch.full_path(Path::new(&link_path));
-
-                // Create parent directories if needed
-                if let Some(parent) = full_link.parent() {
-                    if let Err(_) = std::fs::create_dir_all(parent) {
-                        reply.error(EIO);
-                        return;
-                    }
-                }
-
-                // Create the hard link
-                match std::fs::hard_link(&full_source, &full_link) {
-                    Ok(_) => {
-                        // Update the existing inode's link count
-                        let mut inodes = self.inodes.write();
-                        if let Some(data) = inodes.get_mut(&ino) {
-                            data.attr.nlink += 1;
+            Err(e) => {
+                error!("Failed to create hard link: {:?}", e);
+                match e {
+                    PolicyError::NoBranchesAvailable => reply.error(ENOENT),
+                    PolicyError::IoError(io_err) => {
+                        match io_err.kind() {
+                            std::io::ErrorKind::NotFound => reply.error(ENOENT),
+                            std::io::ErrorKind::PermissionDenied => reply.error(EROFS),
+                            _ => reply.error(EIO),
                         }
-                        
-                        // Return the existing inode attributes
-                        reply.entry(&TTL, &inode_data.attr, 0);
                     }
-                    Err(e) => {
-                        error!("Failed to create hard link: {:?}", e);
-                        reply.error(EIO);
-                    }
+                    _ => reply.error(EIO),
                 }
-            }
-            None => {
-                reply.error(ENOENT);
             }
         }
     }

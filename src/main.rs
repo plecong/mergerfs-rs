@@ -23,6 +23,8 @@ mod rename_minimal_test;
 mod rename_edge_case_tests;
 #[cfg(test)]
 mod symlink_tests;
+#[cfg(test)]
+mod link_tests;
 
 use std::env;
 use std::path::PathBuf;

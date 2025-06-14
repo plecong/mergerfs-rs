@@ -1,6 +1,7 @@
 use super::*;
 use crate::branch::{Branch, BranchMode};
-use crate::policy::{FirstFoundSearchPolicy, AllActionPolicy, ExistingPathAllActionPolicy};
+use crate::policy::{FirstFoundSearchPolicy, AllActionPolicy};
+use crate::policy::action::ExistingPathAllActionPolicy;
 use tempfile::TempDir;
 use std::fs;
 use std::sync::Arc;

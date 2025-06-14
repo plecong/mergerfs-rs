@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use filetime::{set_file_times, FileTime};
 

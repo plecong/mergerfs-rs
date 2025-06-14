@@ -10,10 +10,7 @@ pub use error::PolicyError;
 pub use traits::{ActionPolicy, CreatePolicy, SearchPolicy};
 
 // Re-export all policy implementations
-pub use action::{
-    AllActionPolicy,
-    ExistingPathAllActionPolicy,
-};
+pub use action::AllActionPolicy;
 
 pub use create::{
     FirstFoundCreatePolicy,

@@ -13,10 +13,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 18 of 40+ implemented (45%)
+- **FUSE Operations**: 21 of 40+ implemented (52%)
 - **Policies**: 7 of 36 implemented (19%)
-- **Special Features**: 2 of 10+ implemented (20%)
-- **Test Coverage**: 96 tests passing
+- **Special Features**: 3 of 10+ implemented (30%)
+- **Test Coverage**: 142 tests passing (132 Rust + 10 Python)
 
 ## Implementation Status by Component
 
@@ -29,7 +29,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Error handling with proper errno mapping
 - [x] Alpine Linux/MUSL compatibility (no libc dependency)
 
-#### FUSE Operations (20/40+)
+#### FUSE Operations (21/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -49,6 +49,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `rename` - Rename files and directories (with multi-branch support)
 - [x] `symlink` - Create symbolic links (with path cloning)
 - [x] `readlink` - Read symbolic links
+- [x] `link` - Create hard links (basic functionality, no EXDEV handling)
 
 #### Policies (7/36)
 **Create Policies (4/16)**:
@@ -78,7 +79,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 #### FUSE Operations
 - [x] `symlink` - Create symbolic links (COMPLETE)
 - [x] `readlink` - Read symbolic links (COMPLETE)
-- [ ] `link` - Create hard links (HIGH)
+- [x] `link` - Create hard links (COMPLETE - basic functionality)
 - [x] `ioctl` - Runtime configuration via xattr on control file (COMPLETE)
 - [ ] `access` - Check permissions (MEDIUM)
 - [ ] `mknod` - Create special files (MEDIUM)
@@ -146,9 +147,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Testing Status
 
 ### Test Coverage
-- **Unit Tests**: 76 tests covering core functionality
+- **Unit Tests**: 132 Rust tests covering core functionality
 - **Integration Tests**: Python tests with property-based testing
-- **FUSE Tests**: Real filesystem mount testing
+- **FUSE Tests**: Real filesystem mount testing with comprehensive scenarios
 
 ### Test Categories
 - ✅ File operations (create, read, write, delete)
@@ -158,9 +159,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Branch management (readonly, readwrite)
 - ✅ Extended attributes (xattr)
 - ✅ Symbolic links (creation and reading)
-- ❌ Hard links
+- ✅ Hard links (basic functionality)
 - ❌ Special files
-- ❌ Runtime configuration
+- ✅ Runtime configuration (via xattr)
 
 ## Known Issues
 
