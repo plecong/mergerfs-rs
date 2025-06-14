@@ -79,21 +79,17 @@ class TestMFSPolicyBasic:
     def test_mfs_with_graduated_space_usage(
         self,
         fuse_manager: FuseManager,
-        temp_branches: List[Path],
+        tmpfs_branches: List[Path],
         temp_mountpoint: Path,
         fs_state: FileSystemState
     ):
         """Test MFS with branches having different amounts of used space."""
-        # Create graduated space usage: branch 0 = most used, branch 2 = least used
-        fs_state.create_file_with_size(temp_branches[0] / "heavy.dat", 8000)    # Most used
-        fs_state.create_file_with_size(temp_branches[1] / "medium.dat", 3000)   # Medium used  
-        fs_state.create_file_with_size(temp_branches[2] / "light.dat", 500)     # Least used (most free)
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
-        # Get initial sizes for verification
-        initial_sizes = fs_state.get_branch_sizes(temp_branches)
-        print(f"Initial branch sizes: {initial_sizes}")
-        
-        config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
+        config = FuseConfig(policy="mfs", branches=tmpfs_branches, mountpoint=temp_mountpoint)
         
         with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
             # Create multiple test files
@@ -362,23 +358,21 @@ class TestMFSPolicyComparison:
     def test_mfs_vs_ff_different_behavior(
         self,
         fuse_manager: FuseManager,
-        temp_branches: List[Path],
+        tmpfs_branches: List[Path],
         temp_mountpoint: Path,
         fs_state: FileSystemState
     ):
         """Test that MFS behaves differently from FirstFound policy."""
-        # Set up scenario where FF and MFS should make different choices
-        # Make first branch (FF's choice) heavily used
-        fs_state.create_file_with_size(temp_branches[0] / "ff_burden.dat", 8000)
-        # Leave other branches lighter
-        fs_state.create_file_with_size(temp_branches[1] / "light1.dat", 1000)
-        fs_state.create_file_with_size(temp_branches[2] / "light2.dat", 2000)
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
         results = {}
         
         # Test FF policy - create a new mountpoint for FF test
         ff_mountpoint = fuse_manager.create_temp_mountpoint()
-        ff_config = FuseConfig(policy="ff", branches=temp_branches, mountpoint=ff_mountpoint)
+        ff_config = FuseConfig(policy="ff", branches=tmpfs_branches, mountpoint=ff_mountpoint)
         with fuse_manager.mounted_fs(ff_config) as (process, mountpoint, branches):
             ff_file = mountpoint / "ff_test.txt"
             ff_file.write_text("FF policy test")
@@ -388,7 +382,7 @@ class TestMFSPolicyComparison:
         
         # Test MFS policy - create a new mountpoint for MFS test
         mfs_mountpoint = fuse_manager.create_temp_mountpoint()
-        mfs_config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=mfs_mountpoint)
+        mfs_config = FuseConfig(policy="mfs", branches=tmpfs_branches, mountpoint=mfs_mountpoint)
         with fuse_manager.mounted_fs(mfs_config) as (process, mountpoint, branches):
             mfs_file = mountpoint / "mfs_test.txt"
             mfs_file.write_text("MFS policy test")
@@ -398,9 +392,9 @@ class TestMFSPolicyComparison:
         
         print(f"Policy comparison: FF used branch {results['ff']}, MFS used branch {results['mfs']}")
         
-        # FF should use branch 0 (first), MFS should avoid it (heavily used)
+        # FF should use branch 0 (first), MFS should use branch 2 (most free space)
         assert results['ff'] == 0, "FF should use first branch (0)"
-        assert results['mfs'] != 0, f"MFS should avoid heavily used first branch, but used {results['mfs']}"
+        assert results['mfs'] == 2, f"MFS should use branch with most free space (2), but used {results['mfs']}"
         assert results['ff'] != results['mfs'], "FF and MFS should make different choices"
     
     def test_mfs_policy_consistency_multiple_runs(
