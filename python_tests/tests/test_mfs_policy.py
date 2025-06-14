@@ -114,17 +114,21 @@ class TestMFSPolicyBasic:
     def test_mfs_updates_as_space_changes(
         self,
         fuse_manager: FuseManager,
-        temp_branches: List[Path],
+        tmpfs_branches: List[Path],
         temp_mountpoint: Path,
         fs_state: FileSystemState
     ):
         """Test that MFS adapts as space usage changes during operation."""
-        # Start with branch 1 having most free space
-        fs_state.create_file_with_size(temp_branches[0] / "big_file.dat", 6000)
-        fs_state.create_file_with_size(temp_branches[2] / "medium_file.dat", 3000)
-        # Branch 1 starts empty (most free space)
+        # tmpfs_branches start with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
-        config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
+        # Adjust the space to make branch 1 have the most initially
+        fs_state.create_file_with_size(tmpfs_branches[2] / "large_file.dat", 60 * 1024 * 1024)  # 60MB file
+        # Now: branch 0: 8MB, branch 1: 40MB, branch 2: ~30MB
+        
+        config = FuseConfig(policy="mfs", branches=tmpfs_branches, mountpoint=temp_mountpoint)
         
         with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
             # First file should go to branch 1 (most free space)
@@ -136,7 +140,7 @@ class TestMFSPolicyBasic:
             assert first_locations[0] == 1, f"First file should go to branch 1, went to {first_locations[0]}"
             
             # Now add a large file to branch 1 externally to change space dynamics
-            fs_state.create_file_with_size(temp_branches[1] / "space_changer.dat", 7000)
+            fs_state.create_file_with_size(tmpfs_branches[1] / "space_changer.dat", 35 * 1024 * 1024)  # 35MB file
             
             # Small delay to allow filesystem to recognize changes
             time.sleep(0.1)
@@ -400,16 +404,16 @@ class TestMFSPolicyComparison:
     def test_mfs_policy_consistency_multiple_runs(
         self,
         fuse_manager: FuseManager,
-        temp_branches: List[Path],
+        tmpfs_branches: List[Path],
         temp_mountpoint: Path,
         fs_state: FileSystemState
     ):
         """Test that MFS policy is consistent across multiple runs with same setup."""
-        # Create consistent space setup
-        fs_state.create_file_with_size(temp_branches[0] / "setup0.dat", 2000)
-        fs_state.create_file_with_size(temp_branches[1] / "setup1.dat", 5000)
-        fs_state.create_file_with_size(temp_branches[2] / "setup2.dat", 1000)
-        # Branch 2 should have most free space
+        # tmpfs_branches start with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
+        # So branch 2 should be selected by MFS
         
         placement_results = []
         
@@ -417,7 +421,7 @@ class TestMFSPolicyComparison:
         for run in range(3):
             # Create a fresh mountpoint for each run
             run_mountpoint = fuse_manager.create_temp_mountpoint()
-            config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=run_mountpoint)
+            config = FuseConfig(policy="mfs", branches=tmpfs_branches, mountpoint=run_mountpoint)
             
             with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
                 test_file = mountpoint / f"consistency_test_run_{run}.txt"
