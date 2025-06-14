@@ -61,12 +61,15 @@ class StatFSStateMachine(RuleBasedStateMachine):
         self.state = FileSystemState()
         
         # Setup branches and mount
+        self.branches = self.manager.create_temp_dirs(3)
+        self.mountpoint = self.manager.create_temp_mountpoint()
         config = FuseConfig(
-            policy_type="ff",
-            num_branches=3
+            policy="ff",
+            branches=self.branches,
+            mountpoint=self.mountpoint
         )
-        self.manager.setup(config)
-        self.manager.mount()
+        self.process = self.manager.mount(config)
+        self.config = config
         
         # Track space usage
         self.files_created: Dict[str, int] = {}  # filename -> size
@@ -74,17 +77,17 @@ class StatFSStateMachine(RuleBasedStateMachine):
         
     def teardown(self):
         """Cleanup after test"""
-        self.manager.unmount()
+        self.manager.unmount(self.mountpoint)
         self.manager.cleanup()
     
     @initialize()
     def capture_initial_stats(self):
         """Capture initial filesystem statistics"""
-        self.initial_stats = get_fs_stats(self.manager.mount_point)
+        self.initial_stats = get_fs_stats(self.mountpoint)
         
         # Also capture per-branch stats
         self.branch_stats = []
-        for branch in self.manager.config.branches:
+        for branch in self.branches:
             self.branch_stats.append(get_fs_stats(branch))
     
     @rule(
@@ -100,7 +103,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
         if filename in self.files_created:
             return  # Skip if already exists
         
-        path = self.manager.mount_point / filename
+        path = self.mountpoint / filename
         size_bytes = size_kb * 1024
         
         try:
@@ -109,7 +112,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
                 f.write(b'0' * size_bytes)
             
             self.files_created[filename] = size_bytes
-            self.state.add_file(f"/{filename}", '0' * min(size_bytes, 100))
+            # Note: FileSystemState doesn't have add_file method
             note(f"Created {filename} with {size_kb}KB")
             
         except Exception as e:
@@ -122,12 +125,12 @@ class StatFSStateMachine(RuleBasedStateMachine):
             return
         
         filename = list(self.files_created.keys())[0]
-        path = self.manager.mount_point / filename
+        path = self.mountpoint / filename
         
         try:
             os.unlink(path)
             del self.files_created[filename]
-            del self.state.files[f"/{filename}"]
+            # Note: FileSystemState doesn't have files attribute
             note(f"Deleted {filename}")
             
         except Exception as e:
@@ -142,7 +145,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
     )
     def create_directory(self, dirname: str):
         """Create a directory"""
-        path = self.manager.mount_point / dirname
+        path = self.mountpoint / dirname
         
         try:
             path.mkdir(exist_ok=True)
@@ -153,7 +156,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
     @invariant()
     def check_basic_constraints(self):
         """Verify basic statfs constraints"""
-        stats = get_fs_stats(self.manager.mount_point)
+        stats = get_fs_stats(self.mountpoint)
         
         # Basic sanity checks
         assert stats['blocks'] > 0, "Total blocks must be positive"
@@ -176,7 +179,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
         if not self.initial_stats:
             return
         
-        current_stats = get_fs_stats(self.manager.mount_point)
+        current_stats = get_fs_stats(self.mountpoint)
         
         # Calculate expected space usage
         total_file_size = sum(self.files_created.values())
@@ -197,16 +200,16 @@ class StatFSStateMachine(RuleBasedStateMachine):
     @invariant()
     def check_aggregation_consistency(self):
         """Verify stats are properly aggregated from branches"""
-        mount_stats = get_fs_stats(self.manager.mount_point)
+        mount_stats = get_fs_stats(self.mountpoint)
         
         # Get current branch stats
         current_branch_stats = []
-        for branch in self.manager.config.branches:
+        for branch in self.branches:
             current_branch_stats.append(get_fs_stats(branch))
         
         # Check if all branches are on the same device
         devices = set()
-        for branch in self.manager.config.branches:
+        for branch in self.branches:
             stat = os.stat(branch)
             devices.add(stat.st_dev)
         
@@ -243,20 +246,21 @@ def test_space_calculation(num_files: int, file_sizes: List[int]):
     assume(len(file_sizes) >= num_files)
     
     manager = FuseManager()
-    config = FuseConfig(policy_type="ff", num_branches=2)
+    branches = manager.create_temp_dirs(2)
+    mountpoint = manager.create_temp_mountpoint()
+    config = FuseConfig(policy="ff", branches=branches, mountpoint=mountpoint)
     
     try:
-        manager.setup(config)
-        manager.mount()
+        process = manager.mount(config)
         
         # Get initial stats
-        initial = get_fs_stats(manager.mount_point)
+        initial = get_fs_stats(mountpoint)
         
         # Create files
         total_size = 0
         for i in range(num_files):
             size_bytes = file_sizes[i] * 1024
-            path = manager.mount_point / f"test_{i}.dat"
+            path = mountpoint / f"test_{i}.dat"
             
             with open(path, 'wb') as f:
                 f.write(b'X' * size_bytes)
@@ -264,22 +268,24 @@ def test_space_calculation(num_files: int, file_sizes: List[int]):
             total_size += size_bytes
         
         # Get stats after creating files
-        after = get_fs_stats(manager.mount_point)
+        after = get_fs_stats(mountpoint)
         
-        # Free space should have decreased
-        assert after['bfree'] < initial['bfree'], \
-            "Free space should decrease after creating files"
+        # Free space should have decreased if files were created
+        if num_files > 0 and total_size > 0:
+            assert after['bfree'] < initial['bfree'], \
+                "Free space should decrease after creating files"
         
         # The decrease should be at least the file sizes
-        blocks_used = initial['bfree'] - after['bfree']
-        bytes_used = blocks_used * after['frsize']
-        
-        # Allow 20% overhead for filesystem metadata
-        assert bytes_used >= total_size * 0.8, \
-            f"Space used {bytes_used} less than file sizes {total_size}"
+        if num_files > 0 and total_size > 0:
+            blocks_used = initial['bfree'] - after['bfree']
+            bytes_used = blocks_used * after['frsize']
+            
+            # Allow 20% overhead for filesystem metadata
+            assert bytes_used >= total_size * 0.8, \
+                f"Space used {bytes_used} less than file sizes {total_size}"
         
     finally:
-        manager.unmount()
+        manager.unmount(mountpoint)
         manager.cleanup()
 
 
@@ -297,13 +303,14 @@ def test_block_size_normalization(block_sizes: List[int]):
     # the block sizes of actual filesystems
     
     manager = FuseManager()
-    config = FuseConfig(policy_type="ff", num_branches=len(block_sizes))
+    branches = manager.create_temp_dirs(len(block_sizes))
+    mountpoint = manager.create_temp_mountpoint()
+    config = FuseConfig(policy="ff", branches=branches, mountpoint=mountpoint)
     
     try:
-        manager.setup(config)
-        manager.mount()
+        process = manager.mount(config)
         
-        stats = get_fs_stats(manager.mount_point)
+        stats = get_fs_stats(mountpoint)
         
         # Block size should be reasonable
         assert 512 <= stats['bsize'] <= 65536, \
@@ -320,7 +327,7 @@ def test_block_size_normalization(block_sizes: List[int]):
             "Fragment size should be power of 2"
         
     finally:
-        manager.unmount()
+        manager.unmount(mountpoint)
         manager.cleanup()
 
 

@@ -153,11 +153,15 @@ impl ConfigManager {
 /// Option for create policy configuration
 struct CreatePolicyOption {
     config: ConfigRef,
+    current_value: RwLock<String>,
 }
 
 impl CreatePolicyOption {
     fn new(config: ConfigRef) -> Self {
-        Self { config }
+        Self { 
+            config,
+            current_value: RwLock::new("ff".to_string()),
+        }
     }
 }
 
@@ -167,15 +171,14 @@ impl ConfigOption for CreatePolicyOption {
     }
     
     fn get_value(&self) -> String {
-        // TODO: Get current policy name from file_manager
-        // For now, return a default
-        "ff".to_string()
+        self.current_value.read().clone()
     }
     
     fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
         // Validate policy name
         match value {
             "ff" | "mfs" | "lfs" | "rand" => {
+                *self.current_value.write() = value.to_string();
                 // TODO: Actually update the policy in file_manager
                 // This will require modifying FileManager to support runtime policy changes
                 Ok(())

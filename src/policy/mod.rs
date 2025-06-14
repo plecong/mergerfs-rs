@@ -24,5 +24,7 @@ pub use create::{
 };
 
 pub use search::{
+    AllSearchPolicy,
     FirstFoundSearchPolicy,
+    NewestSearchPolicy,
 };

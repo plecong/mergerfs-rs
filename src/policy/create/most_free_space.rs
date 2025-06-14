@@ -38,6 +38,7 @@ impl CreatePolicy for MostFreeSpaceCreatePolicy {
             
             match DiskSpace::for_path(&branch.path) {
                 Ok(disk_space) => {
+                    tracing::debug!("Branch {:?} has {} bytes available", branch.path, disk_space.available);
                     if disk_space.available > max_free_space {
                         max_free_space = disk_space.available;
                         best_branch = Some(branch.clone());
@@ -49,6 +50,10 @@ impl CreatePolicy for MostFreeSpaceCreatePolicy {
                     continue;
                 }
             }
+        }
+        
+        if let Some(ref branch) = best_branch {
+            tracing::info!("MFS policy selected branch {:?} with {} bytes free", branch.path, max_free_space);
         }
         
         best_branch.ok_or_else(|| {

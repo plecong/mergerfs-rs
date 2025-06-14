@@ -11,7 +11,7 @@ mergerfs-rs is a Rust implementation of mergerfs, a FUSE-based union filesystem 
 ### Development
 - `cargo build` - Build the project
 - `cargo run -- <mountpoint> <branch1> [branch2] ...` - Mount the filesystem
-- `cargo test` - Run tests (60+ comprehensive tests)
+- `cargo test` - Run tests (80+ comprehensive tests)
 - `cargo check` - Type check without building
 - `cargo clippy` - Lint with Clippy
 - `cargo fmt` - Format code
@@ -67,12 +67,6 @@ The heart of mergerfs - determines which filesystem branches to use for operatio
 - Use parking_lot for performance-critical locks
 - Error handling with thiserror and proper errno mapping
 
-### Coding Style
-- **Small, focused files**: Keep source files small and focused on a single responsibility
-- **Separate functionality**: Each implementation (e.g., each policy) should be in its own file
-- **Modular organization**: Use directory structure to logically group related functionality
-- **Clear module exports**: Use mod.rs files to cleanly export public interfaces
-
 ### Performance Considerations
 - Cache filesystem metadata (free space, branch info)
 - Use thread pools for FUSE operations
@@ -113,7 +107,7 @@ This project has been specifically optimized for Alpine Linux and MUSL libc comp
 5. **Error codes** - Hardcoded errno values instead of libc constants
 
 ### Testing on Alpine
-All 60+ tests pass on Alpine Linux environments. The implementation avoids glibc-specific features and uses portable Rust standard library functions wherever possible.
+All 80+ tests pass on Alpine Linux environments. The implementation avoids glibc-specific features and uses portable Rust standard library functions wherever possible.
 
 ## Development Guidelines
 
@@ -127,18 +121,60 @@ The development process for any new feature should be:
 - Plan the implementation in Rust being sure to not use unsafe Rust code or glibc/libc calls and be cross-platform
 - Write unit tests
 - Write external Python based end-to-end integration tests including updating property-based and fuzz test harness for new functionality found under `python_tests`
-- Run all tests both Rust unit and Python integration tests
-- Update the IMPLEMENTATION_STATUS.md with any left over items based on the implementation that are sub-optimal or not production ready (e.g., implemented for initial testing)
-- Clean up all Rust compilation warnings
-- Commit all changes
+- Regression test everything including unit tests, integration tests, and Python-based tests
+- Update IMPLEMENTATION_STATUS.md with the status of the feature
 
-## Test Development Workflow
-- After implementing a new feature, update the Python based tests for new functionality with positive and negative tests and run.
+## Python Testing
 
-## Safety Guidelines
+The Python testing framework is located in `python_tests/` and uses:
+- **uv** for package management (NOT pip/venv directly)
+- **pytest** with fixtures for FUSE filesystem testing
+- **hypothesis** for property-based testing
+- **xattr** module for extended attributes testing
 
-- Never use unsafe Rust code
+### Running Python Tests
 
-## Compatibility Constraints
+```bash
+# Install/update dependencies
+cd python_tests && uv sync
 
-- Never use glibc/libc. Want to maintain compatibility with MUSL (e.g., Alpine Linux)
+# Run specific test file
+uv run pytest test_runtime_config.py -v
+
+# Run all tests
+uv run python run_tests.py --test-type all
+```
+
+### Writing Python Tests
+
+1. Use pytest fixtures from `conftest.py`:
+   - `mounted_fs` - Provides a mounted filesystem tuple: (process, mountpoint, branches)
+   - `fuse_manager` - Session-scoped FUSE manager
+   - `temp_branches` - Creates temporary branch directories
+   - `temp_mountpoint` - Creates temporary mount point
+
+2. Test classes should use `@pytest.mark.integration` for integration tests
+
+3. Import required modules:
+   ```python
+   import os
+   import xattr
+   import pytest
+   from pathlib import Path
+   ```
+
+4. Access mounted filesystem through fixtures:
+   ```python
+   def test_something(self, mounted_fs):
+       process, mountpoint, branches = mounted_fs
+       # mountpoint is a Path object
+       test_file = mountpoint / "test.txt"
+   ```
+
+### Common Testing Mistakes to Avoid
+
+1. **Don't use pip/venv directly** - Always use `uv` for package management
+2. **Don't import non-existent modules** - Check existing test files for patterns
+3. **Use Path objects** - The fixtures return pathlib.Path objects, not strings
+4. **Check file existence** - Ensure control files like `.mergerfs` are actually created
+5. **Update pyproject.toml** - Add new dependencies to pyproject.toml, then run `uv sync`

@@ -123,9 +123,17 @@ impl MergerFS {
     }
 
     pub fn create_file_attr(&self, path: &Path, is_dir: bool) -> Option<FileAttr> {
-        // Check if file exists in any branch
-        if !is_dir && !self.file_manager.file_exists(path) {
-            return None;
+        // Check if path exists in any branch
+        if is_dir {
+            // For directories, use the directory_exists check
+            if !self.file_manager.directory_exists(path) {
+                return None;
+            }
+        } else {
+            // For files, use search policy
+            if !self.file_manager.file_exists_search(path) {
+                return None;
+            }
         }
 
         let now = SystemTime::now();
@@ -219,9 +227,14 @@ impl Filesystem for MergerFS {
             }
         }
 
-        // Try to create attributes for this path (check if file exists)
+        // Try to create attributes for this path
         let path = Path::new(&child_path);
-        if let Some(mut attr) = self.create_file_attr(path, false) {
+        
+        // Check if it's a directory first
+        let is_dir = self.file_manager.directory_exists(path);
+        
+        // Try to create attributes (check if file/dir exists)
+        if let Some(mut attr) = self.create_file_attr(path, is_dir) {
             let ino = self.allocate_inode();
             attr.ino = ino;
 
@@ -277,14 +290,14 @@ impl Filesystem for MergerFS {
                 if data.attr.kind == FileType::RegularFile {
                     let path = Path::new(&data.path);
                     
-                    // Find which branch has the file
-                    let mut branch_idx = None;
-                    for (idx, branch) in self.file_manager.branches.iter().enumerate() {
-                        if branch.full_path(path).exists() {
-                            branch_idx = Some(idx);
-                            break;
+                    // Find which branch has the file using search policy
+                    let branch_idx = match self.file_manager.find_first_branch(path) {
+                        Ok(branch) => {
+                            // Find the index of this branch
+                            self.file_manager.branches.iter().position(|b| Arc::ptr_eq(b, &branch))
                         }
-                    }
+                        Err(_) => None,
+                    };
                     
                     // Create file handle
                     let fh = self.file_handle_manager.create_handle(
@@ -1463,13 +1476,10 @@ impl Filesystem for MergerFS {
             }
         };
 
-        // Check if file exists in any branch
+        // Check if file exists in any branch using search policy
         let path = Path::new(&inode_data.path);
-        let exists = self.file_manager.branches.iter().any(|branch| {
-            branch.full_path(path).exists()
-        });
-
-        if exists {
+        
+        if self.file_manager.file_exists_search(path) {
             // For now, we allow all access if the file exists
             // A proper implementation would check actual permissions
             reply.ok();

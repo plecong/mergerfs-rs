@@ -15,6 +15,7 @@ dependencies = [
     "pytest-xdist>=3.0.0",
     "pytest-timeout>=2.1.0",
     "pytest-benchmark>=4.0.0",
+    "xattr>=0.10.0",
 ]
 
 [project.optional-dependencies]

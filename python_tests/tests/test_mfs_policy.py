@@ -31,23 +31,59 @@ class TestMFSPolicyBasic:
         fs_state.create_file_with_size(temp_branches[0] / "large_file.dat", 5000)
         # Leave other branches empty
         
+        # Debug: Verify large file was created
+        print(f"Large file exists: {(temp_branches[0] / 'large_file.dat').exists()}")
+        print(f"Large file size: {(temp_branches[0] / 'large_file.dat').stat().st_size}")
+        
         config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
         
-        with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
+        # Try mounting directly like in the debug script
+        process = fuse_manager.mount(config)
+        try:
+            mountpoint = config.mountpoint
+            branches = config.branches
+            
+            # Wait for mount to stabilize
+            time.sleep(0.5)
+            # Debug: Check mount is working
+            print(f"Mountpoint: {mountpoint}")
+            print(f"Mountpoint exists: {mountpoint.exists()}")
+            print(f"Branches: {branches}")
+            
             # Create test file - should go to empty branch (not branch 0)
             test_file = mountpoint / "mfs_test.txt"
             test_file.write_text("MFS test content")
             
             # Verify file was created
             assert test_file.exists(), "Test file should exist"
+            print(f"Test file created at: {test_file}")
+            print(f"Test file content: {test_file.read_text()}")
+            
+            # Sync and add a delay to ensure file is written to branch
+            import os
+            os.sync()
+            time.sleep(1.0)
+            
+            # Debug: Check if file exists in branches
+            for i, branch in enumerate(branches):
+                branch_file = branch / "mfs_test.txt"
+                print(f"Branch {i}: file exists = {branch_file.exists()}")
+            
+            # Also check temp_branches to ensure they're the same
+            print("\nChecking temp_branches:")
+            for i, branch in enumerate(temp_branches):
+                branch_file = branch / "mfs_test.txt"
+                print(f"Temp branch {i}: file exists = {branch_file.exists()}")
             
             # Check which branch contains the file
             locations = fs_state.get_file_locations(branches, "mfs_test.txt")
-            assert len(locations) == 1, "File should exist in exactly one branch"
+            assert len(locations) == 1, f"File should exist in exactly one branch, found in {len(locations)} branches"
             
             # Should not be in the populated branch (branch 0)
             assert locations[0] != 0, f"MFS should avoid populated branch 0, but used branch {locations[0]}"
             print(f"MFS correctly selected branch {locations[0]} instead of populated branch 0")
+        finally:
+            fuse_manager.unmount(mountpoint)
     
     def test_mfs_with_graduated_space_usage(
         self,

@@ -89,12 +89,8 @@ fn main() {
     // Parse command line arguments
     let (create_policy, mountpoint, branch_paths) = parse_args(&args);
     
-    println!("mergerfs-rs starting...");
-    println!("Mount point: {}", mountpoint.display());
-    println!("Branches:");
-    
     let mut branches = Vec::new();
-    for (i, branch_path) in branch_paths.iter().enumerate() {
+    for branch_path in branch_paths.iter() {
         if !branch_path.exists() {
             eprintln!("Error: Branch directory {} does not exist", branch_path.display());
             std::process::exit(1);
@@ -102,7 +98,6 @@ fn main() {
         
         let branch = Arc::new(Branch::new(branch_path.clone(), BranchMode::ReadWrite));
         branches.push(branch);
-        println!("  [{}] {} (read-write)", i, branch_path.display());
     }
     
     if branches.is_empty() {
@@ -121,14 +116,6 @@ fn main() {
     let file_manager = FileManager::new(branches, policy);
     let fs = MergerFS::new(file_manager);
     
-    println!("Policy: {} ({})", policy_name, match create_policy.as_str() {
-        "mfs" => "files created in branch with most free space",
-        "lfs" => "files created in branch with least free space",
-        "rand" => "files created in random writable branch",
-        _ => "files created in first writable branch",
-    });
-    println!("Mounting filesystem...");
-    
     // Mount the filesystem
     let options = vec![
         fuser::MountOption::RW,
@@ -138,7 +125,7 @@ fn main() {
     
     match fuser::mount2(fs, &mountpoint, &options) {
         Ok(()) => {
-            println!("Filesystem unmounted successfully");
+            // Filesystem unmounted successfully
         }
         Err(e) => {
             eprintln!("Mount failed: {}", e);

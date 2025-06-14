@@ -1,2 +1,6 @@
 /target
 docs/mergerfs-original/
+__pycache__
+.pytest_cache
+.venv
+.hypothesis/

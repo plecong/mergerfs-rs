@@ -59,12 +59,15 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         self.state = FileSystemState()
         
         # Setup branches and mount
+        self.branches = self.manager.create_temp_dirs(3)
+        self.mountpoint = self.manager.create_temp_mountpoint()
         config = FuseConfig(
-            policy_type="ff",  # Use first-found for predictability
-            num_branches=3
+            policy="ff",  # Use first-found for predictability
+            branches=self.branches,
+            mountpoint=self.mountpoint
         )
-        self.manager.setup(config)
-        self.manager.mount()
+        self.process = self.manager.mount(config)
+        self.config = config
         
         # Track handles
         self.handles: Dict[int, FileHandle] = {}
@@ -82,16 +85,19 @@ class FileHandleStateMachine(RuleBasedStateMachine):
                 except:
                     pass
         
-        self.manager.unmount()
+        self.manager.unmount(self.mountpoint)
         self.manager.cleanup()
     
     @initialize()
     def setup_initial_files(self):
         """Create some initial files for testing"""
         for i in range(3):
-            path = self.manager.mount_point / f"initial_{i}.txt"
+            path = self.mountpoint / f"initial_{i}.txt"
             path.write_text(f"Initial content {i}")
-            self.state.add_file(f"/initial_{i}.txt", f"Initial content {i}")
+            # Note: FileSystemState doesn't have add_file method
+            if not hasattr(self.state, 'files'):
+                self.state.files = {}
+            self.state.files[f"/initial_{i}.txt"] = f"Initial content {i}"
     
     @rule(
         filename=st.text(
@@ -103,11 +109,13 @@ class FileHandleStateMachine(RuleBasedStateMachine):
     )
     def create_file(self, filename: str, content: str):
         """Create a new file"""
-        path = self.manager.mount_point / filename
+        path = self.mountpoint / filename
         
         try:
             path.write_text(content)
-            self.state.add_file(f"/{filename}", content)
+            if not hasattr(self.state, 'files'):
+                self.state.files = {}
+            self.state.files[f"/{filename}"] = content
             note(f"Created file: {filename}")
         except Exception as e:
             note(f"Failed to create file {filename}: {e}")
@@ -133,7 +141,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         else:
             filename = files[0]
         
-        path = self.manager.mount_point / filename.lstrip('/')
+        path = self.mountpoint / filename.lstrip('/')
         
         try:
             # In real implementation, would open actual file
@@ -143,7 +151,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
             
             # Determine which branch would be used
             branch_idx = None
-            for idx, branch in enumerate(self.manager.config.branches):
+            for idx, branch in enumerate(self.branches):
                 if (branch / filename.lstrip('/')).exists():
                     branch_idx = idx
                     break
@@ -177,7 +185,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         if not handle.is_open or 'r' not in handle.mode:
             return
         
-        path = self.manager.mount_point / handle.path.lstrip('/')
+        path = self.mountpoint / handle.path.lstrip('/')
         
         try:
             content = path.read_text()
@@ -206,7 +214,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         if not handle.is_open or handle.mode not in ['w', 'w+', 'a', 'a+']:
             return
         
-        path = self.manager.mount_point / handle.path.lstrip('/')
+        path = self.mountpoint / handle.path.lstrip('/')
         
         try:
             if handle.mode in ['w', 'w+']:
@@ -262,7 +270,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
                 continue
             
             # Check file exists in the recorded branch
-            branch_path = self.manager.config.branches[handle.branch_idx]
+            branch_path = self.branches[handle.branch_idx]
             file_path = branch_path / handle.path.lstrip('/')
             
             if handle.mode not in ['w', 'w+']:  # Write modes might have created it
@@ -280,7 +288,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
     def check_file_consistency(self):
         """Verify files have consistent content across handles"""
         for path, content in self.state.files.items():
-            mount_path = self.manager.mount_point / path.lstrip('/')
+            mount_path = self.mountpoint / path.lstrip('/')
             if mount_path.exists():
                 actual = mount_path.read_text()
                 # Only check if no handles are open for writing
@@ -302,14 +310,15 @@ class FileHandleStateMachine(RuleBasedStateMachine):
 def test_concurrent_read_handles(num_handles: int, content: str):
     """Test multiple read handles to the same file"""
     manager = FuseManager()
-    config = FuseConfig(policy_type="ff", num_branches=3)
+    branches = manager.create_temp_dirs(3)
+    mountpoint = manager.create_temp_mountpoint()
+    config = FuseConfig(policy="ff", branches=branches, mountpoint=mountpoint)
     
     try:
-        manager.setup(config)
-        manager.mount()
+        process = manager.mount(config)
         
         # Create test file
-        test_file = manager.mount_point / "concurrent_test.txt"
+        test_file = mountpoint / "concurrent_test.txt"
         test_file.write_text(content)
         
         # Open multiple read handles
@@ -330,7 +339,7 @@ def test_concurrent_read_handles(num_handles: int, content: str):
             fh.close()
         
     finally:
-        manager.unmount()
+        manager.unmount(mountpoint)
         manager.cleanup()
 
 
@@ -346,13 +355,14 @@ def test_concurrent_read_handles(num_handles: int, content: str):
 def test_handle_persistence(filename: str, iterations: int):
     """Test that handles remain valid across other operations"""
     manager = FuseManager()
-    config = FuseConfig(policy_type="ff", num_branches=2)
+    branches = manager.create_temp_dirs(2)
+    mountpoint = manager.create_temp_mountpoint()
+    config = FuseConfig(policy="ff", branches=branches, mountpoint=mountpoint)
     
     try:
-        manager.setup(config)
-        manager.mount()
+        process = manager.mount(config)
         
-        test_file = manager.mount_point / filename
+        test_file = mountpoint / filename
         test_file.write_text("Initial content")
         
         # Open a read handle
@@ -361,7 +371,7 @@ def test_handle_persistence(filename: str, iterations: int):
         
         # Perform other operations
         for i in range(iterations):
-            other_file = manager.mount_point / f"other_{i}.txt"
+            other_file = mountpoint / f"other_{i}.txt"
             other_file.write_text(f"Other content {i}")
         
         # Original handle should still be valid
@@ -373,7 +383,7 @@ def test_handle_persistence(filename: str, iterations: int):
         read_handle.close()
         
     finally:
-        manager.unmount()
+        manager.unmount(mountpoint)
         manager.cleanup()
 
 

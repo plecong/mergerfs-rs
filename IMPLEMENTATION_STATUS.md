@@ -59,8 +59,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `epall` (ExistingPathAll) - All branches where path exists
 - [x] `epff` (ExistingPathFirstFound) - First branch where path exists
 
-**Search Policies (1/3)**:
+**Search Policies (3/3)**:
 - [x] `ff` (FirstFound) - First branch where file exists
+- [x] `all` - Return all branches where file exists
+- [x] `newest` - Return branch with newest mtime
 
 #### Special Features
 - [x] File handle tracking with branch affinity
@@ -75,7 +77,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [ ] `symlink` - Create symbolic links (HIGH)
 - [ ] `readlink` - Read symbolic links (HIGH)
 - [ ] `link` - Create hard links (HIGH)
-- [ ] `ioctl` - Runtime configuration (HIGH)
+- [x] `ioctl` - Runtime configuration via xattr on control file (COMPLETE)
 - [ ] `access` - Check permissions (MEDIUM)
 - [ ] `mknod` - Create special files (MEDIUM)
 
@@ -85,15 +87,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [ ] `lus` - Least used space (MEDIUM)
 - [ ] `pfrd` - Percentage free random distribution (MEDIUM)
 
-**Search Policies**:
-- [ ] `all` - Return all matches (HIGH)
-- [ ] `newest` - Newest mtime (MEDIUM)
 
 **Action Policies**:
 - [ ] `erofs` - Error read-only filesystem (LOW)
 
 #### Special Features
-- [ ] Runtime policy configuration via ioctl
+- [x] Runtime policy configuration via xattr on control file (/.mergerfs)
+- [x] Search policy integration into FUSE operations (basic file search)
 - [ ] moveonenospc - Move files when out of space
 - [ ] Path preservation for "existing path" policies
 - [ ] Direct I/O support

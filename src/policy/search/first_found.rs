@@ -5,6 +5,12 @@ use std::sync::Arc;
 
 pub struct FirstFoundSearchPolicy;
 
+impl FirstFoundSearchPolicy {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 impl SearchPolicy for FirstFoundSearchPolicy {
     fn name(&self) -> &'static str {
         "ff"

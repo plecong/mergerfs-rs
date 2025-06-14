@@ -1,5 +1,5 @@
 use crate::branch::Branch;
-use crate::policy::{CreatePolicy, PolicyError};
+use crate::policy::{CreatePolicy, SearchPolicy, PolicyError};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -9,13 +9,16 @@ use std::sync::Arc;
 pub struct FileManager {
     pub branches: Vec<Arc<Branch>>,
     pub create_policy: Box<dyn CreatePolicy>,
+    pub search_policy: Box<dyn SearchPolicy>,
 }
 
 impl FileManager {
     pub fn new(branches: Vec<Arc<Branch>>, create_policy: Box<dyn CreatePolicy>) -> Self {
+        use crate::policy::FirstFoundSearchPolicy;
         Self {
             branches,
             create_policy,
+            search_policy: Box::new(FirstFoundSearchPolicy::new()),
         }
     }
 
@@ -25,15 +28,18 @@ impl FileManager {
         let full_path = branch.full_path(path);
         
         tracing::info!("Creating new file {:?} in branch {:?}", path, branch.path);
+        tracing::info!("Full path will be: {:?}", full_path);
         
         // Create parent directories if needed
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         
-        let mut file = File::create(full_path)?;
+        let mut file = File::create(&full_path)?;
         file.write_all(content)?;
         file.sync_all()?; // Ensure data is written to disk
+        
+        tracing::info!("File created successfully at {:?}", full_path);
         Ok(())
     }
     
@@ -128,6 +134,23 @@ impl FileManager {
             let full_path = branch.full_path(path);
             full_path.exists() && full_path.is_dir()
         })
+    }
+
+    /// Search for a path using the configured search policy
+    pub fn search_path(&self, path: &Path) -> Result<Vec<Arc<Branch>>, PolicyError> {
+        self.search_policy.search_branches(&self.branches, path)
+    }
+    
+    /// Get the first branch where path exists (common case)
+    pub fn find_first_branch(&self, path: &Path) -> Result<Arc<Branch>, PolicyError> {
+        let branches = self.search_path(path)?;
+        branches.into_iter().next()
+            .ok_or(PolicyError::NoBranchesAvailable)
+    }
+    
+    /// Check if file exists in any branch using search policy
+    pub fn file_exists_search(&self, path: &Path) -> bool {
+        self.search_path(path).is_ok()
     }
 
     pub fn list_directory(&self, path: &Path) -> Result<Vec<String>, PolicyError> {
