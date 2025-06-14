@@ -127,12 +127,15 @@ class TestCreatePolicies:
         
         results = {}
         
-        # Test each policy
-        for policy in ["ff", "mfs", "lfs", "rand"]:
+        # Test each policy with a fresh mountpoint for each
+        for i, policy in enumerate(["ff", "mfs", "lfs", "rand"]):
+            # Create a unique mountpoint for each test to avoid conflicts
+            policy_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_{policy}"
+            
             config = FuseConfig(
                 policy=policy,
                 branches=temp_branches,
-                mountpoint=temp_mountpoint
+                mountpoint=policy_mountpoint
             )
             
             with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
@@ -180,9 +183,11 @@ class TestUnionBehavior:
             files = list(mountpoint.iterdir())
             filenames = {f.name for f in files}
             
-            # Should see all unique files
+            # Should see all unique files (excluding .mergerfs control file)
             expected_files = {"file_a.txt", "file_b.txt", "file_c.txt", "shared.txt"}
-            assert filenames == expected_files, f"Expected {expected_files}, got {filenames}"
+            # Remove .mergerfs from the actual filenames set for comparison
+            actual_files = filenames - {".mergerfs"}
+            assert actual_files == expected_files, f"Expected {expected_files}, got {actual_files}"
             
             # Shared file should show content from first branch
             shared_content = (mountpoint / "shared.txt").read_text()
@@ -214,9 +219,11 @@ class TestDirectoryOperations:
     
     def test_directory_creation_policies(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
         """Test that directory creation follows the same policy as file creation."""
-        # Setup different space usage
-        fs_state.create_file_with_size(temp_branches[0] / "existing.dat", 1000)
-        fs_state.create_file_with_size(temp_branches[1] / "existing.dat", 5000)
+        # Setup different space usage: branch 0 small file, branch 1 large file, branch 2 medium file
+        # So branch 0 has most free space, branch 1 has least free space
+        fs_state.create_file_with_size(temp_branches[0] / "existing.dat", 1000)   # Most free space
+        fs_state.create_file_with_size(temp_branches[1] / "existing.dat", 5000)   # Least free space
+        fs_state.create_file_with_size(temp_branches[2] / "existing.dat", 3000)   # Medium free space
         
         # Test MFS policy with directories
         config = FuseConfig(
