@@ -385,8 +385,9 @@ class TestMFSPolicyComparison:
         
         results = {}
         
-        # Test FF policy
-        ff_config = FuseConfig(policy="ff", branches=temp_branches, mountpoint=temp_mountpoint)
+        # Test FF policy - create a new mountpoint for FF test
+        ff_mountpoint = fuse_manager.create_temp_mountpoint()
+        ff_config = FuseConfig(policy="ff", branches=temp_branches, mountpoint=ff_mountpoint)
         with fuse_manager.mounted_fs(ff_config) as (process, mountpoint, branches):
             ff_file = mountpoint / "ff_test.txt"
             ff_file.write_text("FF policy test")
@@ -394,8 +395,9 @@ class TestMFSPolicyComparison:
             ff_locations = fs_state.get_file_locations(branches, "ff_test.txt")
             results['ff'] = ff_locations[0] if ff_locations else -1
         
-        # Test MFS policy  
-        mfs_config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
+        # Test MFS policy - create a new mountpoint for MFS test
+        mfs_mountpoint = fuse_manager.create_temp_mountpoint()
+        mfs_config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=mfs_mountpoint)
         with fuse_manager.mounted_fs(mfs_config) as (process, mountpoint, branches):
             mfs_file = mountpoint / "mfs_test.txt"
             mfs_file.write_text("MFS policy test")
@@ -424,12 +426,14 @@ class TestMFSPolicyComparison:
         fs_state.create_file_with_size(temp_branches[2] / "setup2.dat", 1000)
         # Branch 2 should have most free space
         
-        config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
-        
         placement_results = []
         
-        # Run multiple times with same configuration
+        # Run multiple times with same configuration but new mountpoints each time
         for run in range(3):
+            # Create a fresh mountpoint for each run
+            run_mountpoint = fuse_manager.create_temp_mountpoint()
+            config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=run_mountpoint)
+            
             with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
                 test_file = mountpoint / f"consistency_test_run_{run}.txt"
                 test_file.write_text(f"Consistency test run {run}")
