@@ -190,11 +190,12 @@ class TestRandomPolicy:
         """Compare random policy behavior to first-found policy."""
         results = {}
         
-        # Test first-found policy
+        # Test first-found policy with unique mountpoint
+        ff_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_ff"
         config_ff = FuseConfig(
             policy="ff",
             branches=temp_branches,
-            mountpoint=temp_mountpoint
+            mountpoint=ff_mountpoint
         )
         
         with fuse_manager.mounted_fs(config_ff) as (process, mountpoint, branches):
@@ -206,11 +207,12 @@ class TestRandomPolicy:
                 ff_branches.update(locations)
             results['ff'] = ff_branches
         
-        # Test random policy
+        # Test random policy with unique mountpoint
+        rand_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_rand"
         config_rand = FuseConfig(
             policy="rand",
             branches=temp_branches,
-            mountpoint=temp_mountpoint
+            mountpoint=rand_mountpoint
         )
         
         with fuse_manager.mounted_fs(config_rand) as (process, mountpoint, branches):
