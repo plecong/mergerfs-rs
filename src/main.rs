@@ -10,6 +10,7 @@ mod fuse_fs;
 mod integration_tests;
 mod fuse_integration_tests;
 mod directory_ops_tests;
+mod rename_ops;
 
 #[cfg(test)]
 mod test_utils;
@@ -109,7 +110,7 @@ fn main() {
     }
     
     // Initialize the filesystem with selected policy
-    let (policy_name, policy): (&str, Box<dyn CreatePolicy>) = match create_policy.as_str() {
+    let (_policy_name, policy): (&str, Box<dyn CreatePolicy>) = match create_policy.as_str() {
         "mfs" => ("MostFreeSpace", Box::new(MostFreeSpaceCreatePolicy::new())),
         "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy::new())),
         "rand" => ("Random", Box::new(RandomCreatePolicy::new())),

@@ -107,7 +107,7 @@ mod directory_ops_tests {
     #[test]
     #[serial]
     fn test_directory_exists_check() {
-        let (temp_dirs, file_manager) = setup_test_dirs();
+        let (_temp_dirs, file_manager) = setup_test_dirs();
 
         // Initially, directory should not exist
         let dir_path = Path::new("existence_test");

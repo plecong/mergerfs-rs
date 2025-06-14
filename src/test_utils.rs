@@ -11,6 +11,7 @@ use std::sync::Arc;
 /// Test setup for space-based policy testing
 pub struct SpacePolicyTestSetup {
     pub branches: Vec<(TempDir, u64)>, // (temp_dir, available_mb)
+    #[allow(dead_code)]
     mock_space: bool,
 }
 
@@ -91,7 +92,6 @@ pub fn get_test_disk_space(path: &Path) -> std::io::Result<DiskSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{CreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy};
     
     #[test]
     fn test_space_policy_setup() {

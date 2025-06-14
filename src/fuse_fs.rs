@@ -4,8 +4,9 @@ use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
 use crate::file_handle::FileHandleManager;
 use crate::xattr::{XattrManager, XattrError, XattrFlags};
-use crate::policy::{FirstFoundSearchPolicy};
-use crate::config_manager::{ConfigManager, ConfigError};
+use crate::policy::{FirstFoundSearchPolicy, FirstFoundCreatePolicy};
+use crate::config_manager::ConfigManager;
+use crate::rename_ops::RenameManager;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
     ReplyOpen, ReplyWrite, Request,
@@ -37,6 +38,7 @@ pub struct MergerFS {
     pub file_handle_manager: Arc<FileHandleManager>,
     pub xattr_manager: Arc<XattrManager>,
     pub config_manager: Arc<ConfigManager>,
+    pub rename_manager: Arc<RenameManager>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
 }
@@ -56,11 +58,19 @@ impl MergerFS {
         
         // Create xattr manager with search and action policies
         let xattr_manager = XattrManager::new(
+            branches.clone(),
+            Box::new(FirstFoundSearchPolicy),
+            Box::new(AllActionPolicy::new()),
+            Box::new(FirstFoundSearchPolicy),
+            Box::new(AllActionPolicy::new()),
+        );
+        
+        // Create rename manager with appropriate policies
+        let rename_manager = RenameManager::new(
             branches,
+            Box::new(AllActionPolicy),
             Box::new(FirstFoundSearchPolicy),
-            Box::new(AllActionPolicy::new()),
-            Box::new(FirstFoundSearchPolicy),
-            Box::new(AllActionPolicy::new()),
+            Box::new(FirstFoundCreatePolicy::new()),
         );
         
         let config = crate::config::create_config();
@@ -99,6 +109,7 @@ impl MergerFS {
             file_handle_manager: Arc::new(FileHandleManager::new()),
             xattr_manager: Arc::new(xattr_manager),
             config_manager: Arc::new(config_manager),
+            rename_manager: Arc::new(rename_manager),
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
         }
@@ -1141,67 +1152,36 @@ impl Filesystem for MergerFS {
             format!("{}/{}", newparent_data.path, newname_str)
         };
 
-        // Find which branch has the source file/directory
-        let mut source_branch = None;
-        for branch in &self.file_manager.branches {
-            let full_old_path = branch.full_path(Path::new(&old_path));
-            if full_old_path.exists() {
-                source_branch = Some(branch);
-                break;
+        debug!("Resolved paths - old: {:?}, new: {:?}", old_path, new_path);
+
+        // Use RenameManager to handle the rename operation
+        match self.rename_manager.rename(Path::new(&old_path), Path::new(&new_path)) {
+            Ok(()) => {
+                // Update inode cache
+                let mut inodes = self.inodes.write();
+                let mut updates = Vec::new();
+                
+                for (&ino, data) in inodes.iter() {
+                    if data.path == old_path {
+                        updates.push((ino, new_path.clone()));
+                    } else if data.path.starts_with(&format!("{}/", old_path)) {
+                        // Update children paths
+                        let suffix = &data.path[old_path.len()..];
+                        updates.push((ino, format!("{}{}", new_path, suffix)));
+                    }
+                }
+                
+                for (ino, new_path) in updates {
+                    if let Some(data) = inodes.get_mut(&ino) {
+                        data.path = new_path;
+                    }
+                }
+                
+                reply.ok();
             }
-        }
-
-        match source_branch {
-            Some(branch) => {
-                if !branch.allows_create() {
-                    reply.error(EROFS);
-                    return;
-                }
-
-                let full_old_path = branch.full_path(Path::new(&old_path));
-                let full_new_path = branch.full_path(Path::new(&new_path));
-
-                // Create parent directory if needed
-                if let Some(parent) = full_new_path.parent() {
-                    if let Err(_) = std::fs::create_dir_all(parent) {
-                        reply.error(EIO);
-                        return;
-                    }
-                }
-
-                // Perform the rename
-                match std::fs::rename(&full_old_path, &full_new_path) {
-                    Ok(_) => {
-                        // Update inode cache
-                        let mut inodes = self.inodes.write();
-                        let mut updates = Vec::new();
-                        
-                        for (&ino, data) in inodes.iter() {
-                            if data.path == old_path {
-                                updates.push((ino, new_path.clone()));
-                            } else if data.path.starts_with(&format!("{}/", old_path)) {
-                                // Update children paths
-                                let suffix = &data.path[old_path.len()..];
-                                updates.push((ino, format!("{}{}", new_path, suffix)));
-                            }
-                        }
-                        
-                        for (ino, new_path) in updates {
-                            if let Some(data) = inodes.get_mut(&ino) {
-                                data.path = new_path;
-                            }
-                        }
-                        
-                        reply.ok();
-                    }
-                    Err(e) => {
-                        error!("Rename failed: {:?}", e);
-                        reply.error(EIO);
-                    }
-                }
-            }
-            None => {
-                reply.error(ENOENT);
+            Err(e) => {
+                error!("Rename failed: {:?}", e);
+                reply.error(e.to_errno());
             }
         }
     }
@@ -1872,7 +1852,7 @@ mod tests {
 
     #[test]
     fn test_create_file_attr() {
-        let (_temp_dirs, mut fs) = setup_test_fs();
+        let (_temp_dirs, fs) = setup_test_fs();
         
         // Create a test file first
         let test_content = b"test content";

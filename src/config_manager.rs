@@ -1,5 +1,4 @@
-use crate::config::{Config, ConfigRef};
-use crate::policy::{CreatePolicy, ActionPolicy, SearchPolicy};
+use crate::config::ConfigRef;
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -51,6 +50,7 @@ pub trait ConfigOption: Send + Sync {
 /// Manages runtime configuration through xattr interface
 pub struct ConfigManager {
     options: Arc<RwLock<HashMap<String, Box<dyn ConfigOption>>>>,
+    #[allow(dead_code)]
     config: ConfigRef,
 }
 
@@ -152,6 +152,7 @@ impl ConfigManager {
 
 /// Option for create policy configuration
 struct CreatePolicyOption {
+    #[allow(dead_code)]
     config: ConfigRef,
     current_value: RwLock<String>,
 }
@@ -200,6 +201,7 @@ struct BooleanOption {
     name: String,
     value: Arc<RwLock<bool>>,
     help: String,
+    #[allow(dead_code)]
     config: ConfigRef,
 }
 

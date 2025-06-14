@@ -854,7 +854,7 @@ mod fuse_integration_tests {
     #[test]
     #[serial]
     fn test_fuse_file_handle_tracking() {
-        let (_temp_dirs, mut fs) = setup_test_mergerfs();
+        let (_temp_dirs, fs) = setup_test_mergerfs();
         
         // Create a test file
         let test_path = Path::new("/test_handles.txt");
@@ -910,7 +910,7 @@ mod fuse_integration_tests {
     #[test]
     #[serial]
     fn test_fuse_file_handle_branch_affinity() {
-        let (_temp_dirs, mut fs) = setup_test_mergerfs();
+        let (_temp_dirs, fs) = setup_test_mergerfs();
         
         // Create a file that exists in multiple branches
         let test_path = Path::new("/multi_branch.txt");

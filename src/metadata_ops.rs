@@ -224,7 +224,6 @@ pub struct FileMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{AllActionPolicy, ExistingPathAllActionPolicy};
     use crate::branch::{Branch, BranchMode};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
