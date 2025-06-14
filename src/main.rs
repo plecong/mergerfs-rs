@@ -19,6 +19,8 @@ mod test_utils;
 mod rename_strategy_tests;
 #[cfg(test)]
 mod rename_minimal_test;
+#[cfg(test)]
+mod rename_edge_case_tests;
 
 use std::env;
 use std::path::PathBuf;

@@ -35,7 +35,7 @@ impl ActionPolicy for AllActionPolicy {
         let mut target_branches = Vec::new();
         
         for branch in branches {
-            if !branch.allows_create() {
+            if branch.is_readonly() {
                 continue; // Skip readonly branches
             }
             

@@ -72,7 +72,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(MockPathPreservingPolicy { path_preserving: true }),
             config,
@@ -125,20 +125,10 @@ mod tests {
         let new_path = Path::new("dir2/renamed.txt");
         fs::write(branches[1].path.join(old_path), "content").unwrap();
         
-        // Verify file exists before rename
-        eprintln!("Branch 0 path: {:?}", branches[0].path);
-        eprintln!("Branch 1 path: {:?}", branches[1].path);
-        eprintln!("Branch 0 old path exists: {}", branches[0].path.join(old_path).exists());
-        eprintln!("Branch 1 old path exists: {}", branches[1].path.join(old_path).exists());
-        
-        // Double check by looking at actual path
-        eprintln!("Looking for file at: {:?}", branches[1].path.join(old_path));
-        eprintln!("File contents: {:?}", fs::read_to_string(branches[1].path.join(old_path)));
-        
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(MockPathPreservingPolicy { path_preserving: false }),
             config,
@@ -146,10 +136,7 @@ mod tests {
         
         // Perform rename
         let result = rename_mgr.rename(old_path, new_path);
-        if let Err(e) = &result {
-            eprintln!("test_create_path_strategy failed with error: {:?}", e);
-        }
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Rename failed: {:?}", result);
         
         // Verify:
         // 1. File renamed on branch where it existed
@@ -204,7 +191,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(MockPathPreservingPolicy { path_preserving: false }),
             config,
@@ -252,7 +239,7 @@ mod tests {
         
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(MockPathPreservingPolicy { path_preserving: true }), // Should be ignored
             config,
@@ -280,7 +267,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches,
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(MockPathPreservingPolicy { path_preserving: true }),
             config,

@@ -195,11 +195,10 @@ impl RenameManager {
         }
         
         // 2. Get target branches for new path's parent using search policy
+        // Note: It's OK if parent doesn't exist yet - we'll create it
         let parent_path = new_path.parent().ok_or(RenameError::InvalidPath)?;
-        let target_branches = self.search_policy.search_branches(&self.branches, parent_path)?;
-        if target_branches.is_empty() {
-            return Err(RenameError::InvalidPath);
-        }
+        let target_branches = self.search_policy.search_branches(&self.branches, parent_path)
+            .unwrap_or_else(|_| Vec::new());
         
         let mut any_success = false;
         let mut to_remove = Vec::new();
@@ -227,13 +226,47 @@ impl RenameManager {
             
             // 6. If rename fails with ENOENT, try creating parent directory
             if let Err(ref e) = rename_result {
-                if e.kind() == io::ErrorKind::NotFound && !target_branches.is_empty() {
-                    // Clone path structure from first target branch
-                    if let Ok(_) = fs_utils::ensure_parent_cloned(
-                        &target_branches[0].path,
-                        &branch.path,
-                        new_path
-                    ) {
+                if e.kind() == io::ErrorKind::NotFound {
+                    // Try to create parent directory
+                    let created = if !target_branches.is_empty() {
+                        // Clone path structure from first target branch
+                        fs_utils::ensure_parent_cloned(
+                            &target_branches[0].path,
+                            &branch.path,
+                            new_path
+                        ).is_ok()
+                    } else {
+                        // No existing parent on target branches, try to find it on source branches
+                        let mut cloned = false;
+                        if let Some(parent) = new_path.parent() {
+                            // Look for the parent directory on any branch
+                            for src_branch in &self.branches {
+                                if src_branch.full_path(parent).exists() {
+                                    // Clone from this branch
+                                    if fs_utils::ensure_parent_cloned(
+                                        &src_branch.path,
+                                        &branch.path,
+                                        new_path
+                                    ).is_ok() {
+                                        cloned = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // If still not cloned, create directory without cloning
+                            if !cloned {
+                                let parent_full = branch.full_path(parent);
+                                fs::create_dir_all(&parent_full).is_ok()
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    if created {
                         // Retry rename
                         rename_result = fs::rename(&old_full_path, &new_full_path);
                     }
@@ -303,7 +336,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy),
             config,
@@ -338,7 +371,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy),
             config,
@@ -360,7 +393,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches,
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy),
             config,
@@ -401,7 +434,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             vec![branch1.clone(), branch2.clone()],
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy),
             config,
@@ -433,7 +466,7 @@ mod tests {
         let config = create_config();
         let rename_mgr = RenameManager::new(
             branches.clone(),
-            Box::new(AllActionPolicy),
+            Box::new(AllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy),
             config,
