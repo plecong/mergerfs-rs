@@ -65,15 +65,17 @@ impl MergerFS {
             Box::new(AllActionPolicy::new()),
         );
         
+        let config = crate::config::create_config();
+        
         // Create rename manager with appropriate policies
         let rename_manager = RenameManager::new(
             branches,
             Box::new(AllActionPolicy),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy::new()),
+            config.clone(),
         );
         
-        let config = crate::config::create_config();
         let config_manager = ConfigManager::new(config.clone());
         
         let mut inodes = HashMap::new();

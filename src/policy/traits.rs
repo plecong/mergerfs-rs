@@ -11,6 +11,12 @@ pub trait CreatePolicy: Send + Sync {
         branches: &[Arc<Branch>],
         path: &Path,
     ) -> Result<Arc<Branch>, PolicyError>;
+    
+    /// Returns true if this policy is path-preserving (epff, eplfs, eplus, epmfs)
+    /// Path-preserving policies try to keep files on branches where parent directories exist
+    fn is_path_preserving(&self) -> bool {
+        false // Default to false, override in path-preserving policies
+    }
 }
 
 /// Action policies determine which branch instances to operate on for metadata changes

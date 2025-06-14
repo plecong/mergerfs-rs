@@ -29,11 +29,26 @@ impl Default for StatFSIgnore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RenameEXDEV {
+    Passthrough, // Return EXDEV error to caller
+    RelSymlink,  // Create relative symlinks
+    AbsSymlink,  // Create absolute symlinks
+}
+
+impl Default for RenameEXDEV {
+    fn default() -> Self {
+        RenameEXDEV::Passthrough
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub statfs_mode: StatFSMode,
     pub statfs_ignore: StatFSIgnore,
     pub mountpoint: PathBuf,
+    pub ignore_path_preserving_on_rename: bool,
+    pub rename_exdev: RenameEXDEV,
 }
 
 impl Default for Config {
@@ -42,6 +57,8 @@ impl Default for Config {
             statfs_mode: StatFSMode::default(),
             statfs_ignore: StatFSIgnore::default(),
             mountpoint: PathBuf::from("/mnt/mergerfs"),
+            ignore_path_preserving_on_rename: false,
+            rename_exdev: RenameEXDEV::default(),
         }
     }
 }

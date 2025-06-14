@@ -7,6 +7,7 @@ mod file_ops;
 mod file_handle;
 mod xattr;
 mod fuse_fs;
+mod fs_utils;
 mod integration_tests;
 mod fuse_integration_tests;
 mod directory_ops_tests;
@@ -14,6 +15,10 @@ mod rename_ops;
 
 #[cfg(test)]
 mod test_utils;
+#[cfg(test)]
+mod rename_strategy_tests;
+#[cfg(test)]
+mod rename_minimal_test;
 
 use std::env;
 use std::path::PathBuf;
