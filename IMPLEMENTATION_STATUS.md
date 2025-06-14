@@ -29,7 +29,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Error handling with proper errno mapping
 - [x] Alpine Linux/MUSL compatibility (no libc dependency)
 
-#### FUSE Operations (18/40+)
+#### FUSE Operations (20/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -47,6 +47,8 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `release` - Close file handles
 - [x] `getxattr`/`setxattr`/`listxattr`/`removexattr` - Extended attributes
 - [x] `rename` - Rename files and directories (with multi-branch support)
+- [x] `symlink` - Create symbolic links (with path cloning)
+- [x] `readlink` - Read symbolic links
 
 #### Policies (7/36)
 **Create Policies (4/16)**:
@@ -74,8 +76,8 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ### 🚧 In Progress / High Priority
 
 #### FUSE Operations
-- [ ] `symlink` - Create symbolic links (HIGH)
-- [ ] `readlink` - Read symbolic links (HIGH)
+- [x] `symlink` - Create symbolic links (COMPLETE)
+- [x] `readlink` - Read symbolic links (COMPLETE)
 - [ ] `link` - Create hard links (HIGH)
 - [x] `ioctl` - Runtime configuration via xattr on control file (COMPLETE)
 - [ ] `access` - Check permissions (MEDIUM)
@@ -155,7 +157,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Policy testing (all implemented policies)
 - ✅ Branch management (readonly, readwrite)
 - ✅ Extended attributes (xattr)
-- ✅ Symbolic links (detection and metadata preservation)
+- ✅ Symbolic links (creation and reading)
 - ❌ Hard links
 - ❌ Special files
 - ❌ Runtime configuration

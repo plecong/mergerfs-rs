@@ -85,8 +85,11 @@ pub fn get_test_disk_space(path: &Path) -> std::io::Result<DiskSpace> {
         }
     }
     
-    // Fall back to real disk space calculation
-    DiskSpace::for_path(path)
+    // No marker file found, return an error
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "No space marker file found"
+    ))
 }
 
 #[cfg(test)]

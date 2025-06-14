@@ -1221,68 +1221,42 @@ impl Filesystem for MergerFS {
             format!("{}/{}", parent_data.path, link_name_str)
         };
 
-        // Use create policy to determine which branch
+        // Use FileManager to create the symlink
         let path = Path::new(&link_path);
-        match self.file_manager.create_policy.select_branch(&self.file_manager.branches, path) {
-            Ok(branch) => {
-                let full_link_path = branch.full_path(path);
+        match self.file_manager.create_symlink(path, target) {
+            Ok(_) => {
+                // Create inode for the symlink
+                let now = SystemTime::now();
+                let ino = self.allocate_inode();
                 
-                // Create parent directories if needed
-                if let Some(parent) = full_link_path.parent() {
-                    if let Err(_) = std::fs::create_dir_all(parent) {
-                        reply.error(EIO);
-                        return;
-                    }
-                }
+                let attr = FileAttr {
+                    ino,
+                    size: target.as_os_str().len() as u64,
+                    blocks: 1,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    crtime: now,
+                    kind: FileType::Symlink,
+                    perm: 0o777,
+                    nlink: 1,
+                    uid: 1000,
+                    gid: 1000,
+                    rdev: 0,
+                    flags: 0,
+                    blksize: 512,
+                };
 
-                // Create the symlink
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::symlink;
-                    match symlink(target, &full_link_path) {
-                        Ok(_) => {
-                            // Create inode for the symlink
-                            let now = SystemTime::now();
-                            let ino = self.allocate_inode();
-                            
-                            let attr = FileAttr {
-                                ino,
-                                size: target.as_os_str().len() as u64,
-                                blocks: 1,
-                                atime: now,
-                                mtime: now,
-                                ctime: now,
-                                crtime: now,
-                                kind: FileType::Symlink,
-                                perm: 0o777,
-                                nlink: 1,
-                                uid: 1000,
-                                gid: 1000,
-                                rdev: 0,
-                                flags: 0,
-                                blksize: 512,
-                            };
+                let inode_data = InodeData {
+                    path: link_path,
+                    attr,
+                };
 
-                            let inode_data = InodeData {
-                                path: link_path,
-                                attr,
-                            };
-
-                            self.inodes.write().insert(ino, inode_data);
-                            reply.entry(&TTL, &attr, 0);
-                        }
-                        Err(e) => {
-                            error!("Failed to create symlink: {:?}", e);
-                            reply.error(EIO);
-                        }
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    reply.error(ENOSYS);
-                }
+                self.inodes.write().insert(ino, inode_data);
+                reply.entry(&TTL, &attr, 0);
             }
             Err(e) => {
+                error!("Failed to create symlink: {:?}", e);
                 reply.error(e.errno());
             }
         }
@@ -1309,7 +1283,8 @@ impl Filesystem for MergerFS {
         // Find which branch has the symlink
         for branch in &self.file_manager.branches {
             let full_path = branch.full_path(path);
-            if full_path.exists() {
+            // Use symlink_metadata to check if symlink exists (even if broken)
+            if std::fs::symlink_metadata(&full_path).is_ok() {
                 match std::fs::read_link(&full_path) {
                     Ok(target) => {
                         use std::os::unix::ffi::OsStrExt;

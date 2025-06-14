@@ -128,6 +128,57 @@ impl FileManager {
         std::fs::create_dir_all(full_path)?;
         Ok(())
     }
+    
+    pub fn create_symlink(&self, link_path: &Path, target: &Path) -> Result<(), PolicyError> {
+        // Select branch for new symlink using create policy
+        let branch = self.create_policy.select_branch(&self.branches, link_path)?;
+        let full_link_path = branch.full_path(link_path);
+        
+        tracing::info!("Creating symlink {:?} -> {:?} in branch {:?}", link_path, target, branch.path);
+        
+        // Find a branch that has the parent directory to use as template for cloning
+        let parent_path = link_path.parent().unwrap_or_else(|| Path::new("/"));
+        let template_branch = self.find_first_branch(parent_path).ok();
+        
+        // Clone parent directory structure from template branch if available
+        if let Some(ref template) = template_branch {
+            if let Some(parent) = link_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    use crate::fs_utils;
+                    if let Err(e) = fs_utils::clone_path(&template.path, &branch.path, parent) {
+                        tracing::warn!("Failed to clone parent path structure: {:?}", e);
+                        // Fall back to simple directory creation
+                        if let Some(parent_dir) = full_link_path.parent() {
+                            std::fs::create_dir_all(parent_dir)?;
+                        }
+                    }
+                }
+            }
+        } else {
+            // No template found, just create parent directories
+            if let Some(parent) = full_link_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        
+        // Create the symlink
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(target, &full_link_path)?;
+        }
+        
+        #[cfg(not(unix))]
+        {
+            return Err(PolicyError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Symlinks not supported on this platform"
+            )));
+        }
+        
+        tracing::info!("Symlink created successfully at {:?}", full_link_path);
+        Ok(())
+    }
 
     pub fn directory_exists(&self, path: &Path) -> bool {
         self.branches.iter().any(|branch| {
