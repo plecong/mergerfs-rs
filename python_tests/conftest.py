@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Generator
 
 from lib.fuse_manager import FuseManager, FuseConfig, FileSystemState
+from lib.tmpfs_manager import TmpfsManager, get_tmpfs_manager
 
 
 @pytest.fixture(scope="session")
@@ -25,6 +26,26 @@ def fuse_manager() -> Generator[FuseManager, None, None]:
 def temp_branches(fuse_manager: FuseManager) -> List[Path]:
     """Create 3 temporary branch directories."""
     return fuse_manager.create_temp_dirs(3)
+
+
+@pytest.fixture
+def tmpfs_branches() -> Generator[List[Path], None, None]:
+    """Create 3 tmpfs mounts with different sizes for testing space-based policies."""
+    tmpfs_mgr = get_tmpfs_manager()
+    
+    # Validate that tmpfs mounts are available
+    is_valid, errors = tmpfs_mgr.validate_setup()
+    if not is_valid:
+        pytest.skip(f"Tmpfs mounts not available: {'; '.join(errors)}")
+    
+    # Prepare 3 mounts with specific free space:
+    # small: 8MB free, medium: 40MB free, large: 90MB free
+    try:
+        small_mount, medium_mount, large_mount = tmpfs_mgr.prepare_space_test(8, 40, 90)
+        yield [small_mount.path, medium_mount.path, large_mount.path]
+    finally:
+        # Clean up after test
+        tmpfs_mgr.clear_all()
 
 
 @pytest.fixture

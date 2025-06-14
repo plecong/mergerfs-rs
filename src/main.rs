@@ -11,6 +11,9 @@ mod integration_tests;
 mod fuse_integration_tests;
 mod directory_ops_tests;
 
+#[cfg(test)]
+mod test_utils;
+
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;

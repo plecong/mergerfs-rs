@@ -649,39 +649,21 @@ mod fuse_integration_tests {
     #[test]
     #[serial]
     fn test_fuse_most_free_space_policy() {
-        let temp1 = TempDir::new().unwrap();
-        let temp2 = TempDir::new().unwrap();
-        let temp3 = TempDir::new().unwrap();
-
-        // Create different amounts of content to simulate different free space
-        // temp1: small file (more free space)
-        std::fs::write(temp1.path().join("existing_small.txt"), "small").unwrap();
+        use crate::test_utils::SpacePolicyTestSetup;
         
-        // temp2: large file (less free space)
-        std::fs::write(temp2.path().join("existing_large.txt"), "x".repeat(2000)).unwrap();
+        // Create test setup with specific available space:
+        // branch 0: 10MB available (least)
+        // branch 1: 30MB available (medium)
+        // branch 2: 80MB available (most)
+        let setup = SpacePolicyTestSetup::new(10, 30, 80);
+        setup.setup_space();
         
-        // temp3: medium file
-        std::fs::write(temp3.path().join("existing_medium.txt"), "y".repeat(500)).unwrap();
-
-        let branch1 = Arc::new(Branch::new(
-            temp1.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch2 = Arc::new(Branch::new(
-            temp2.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch3 = Arc::new(Branch::new(
-            temp3.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-
-        let branches = vec![branch2.clone(), branch3.clone(), branch1.clone()]; // Put most used first
+        let branches = setup.get_branches();
         let policy = Box::new(MostFreeSpaceCreatePolicy);
-        let file_manager = FileManager::new(branches, policy);
+        let file_manager = FileManager::new(branches.clone(), policy);
         let fs = MergerFS::new(file_manager);
 
-        // Create several test files - they should go to the branch with most free space (temp1)
+        // Create several test files - they should go to branch 2 (most free space)
         let test_files = vec!["mfs_test1.txt", "mfs_test2.txt", "mfs_test3.txt"];
         
         for filename in &test_files {
@@ -694,15 +676,16 @@ mod fuse_integration_tests {
             assert!(fs.file_manager.file_exists(path), "File {} should exist after MFS creation", filename);
         }
 
-        // Verify that files were created in temp1 (most free space)
+        // Verify that files were created in branch 2 (most free space - 80MB)
+        let paths = setup.get_paths();
         for filename in &test_files {
-            let path_in_temp1 = temp1.path().join(filename);
-            let path_in_temp2 = temp2.path().join(filename);
-            let path_in_temp3 = temp3.path().join(filename);
+            let path_in_branch0 = paths[0].join(filename);
+            let path_in_branch1 = paths[1].join(filename);
+            let path_in_branch2 = paths[2].join(filename);
             
-            assert!(path_in_temp1.exists(), "File {} should exist in temp1 (most free space)", filename);
-            assert!(!path_in_temp2.exists(), "File {} should NOT exist in temp2 (less free space)", filename);
-            assert!(!path_in_temp3.exists(), "File {} should NOT exist in temp3 (medium space)", filename);
+            assert!(!path_in_branch0.exists(), "File {} should NOT exist in branch 0 (10MB available)", filename);
+            assert!(!path_in_branch1.exists(), "File {} should NOT exist in branch 1 (30MB available)", filename);
+            assert!(path_in_branch2.exists(), "File {} should exist in branch 2 (80MB available)", filename);
         }
 
         // Test that we can still read all files through the union filesystem
@@ -720,24 +703,18 @@ mod fuse_integration_tests {
     #[test]
     #[serial]
     fn test_fuse_policy_comparison() {
+        use crate::test_utils::SpacePolicyTestSetup;
+        
         // Test that FF and MFS policies behave differently
-        let temp1 = TempDir::new().unwrap();
-        let temp2 = TempDir::new().unwrap();
+        // Create two branches with different available space
+        let setup = SpacePolicyTestSetup::new(20, 60, 100); // We'll only use first two
+        setup.setup_space();
+        
+        let branches = setup.get_branches();
+        let branch1 = branches[0].clone(); // 20MB available
+        let branch2 = branches[1].clone(); // 60MB available
 
-        // Create different space usage
-        std::fs::write(temp1.path().join("big_file.txt"), "x".repeat(5000)).unwrap(); // Less free space
-        std::fs::write(temp2.path().join("small_file.txt"), "small").unwrap(); // More free space
-
-        let branch1 = Arc::new(Branch::new(
-            temp1.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch2 = Arc::new(Branch::new(
-            temp2.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-
-        // Test FirstFound policy (should use first branch)
+        // Test FirstFound policy (should use first branch regardless of space)
         let ff_branches = vec![branch1.clone(), branch2.clone()];
         let ff_policy = Box::new(FirstFoundCreatePolicy);
         let ff_file_manager = FileManager::new(ff_branches, ff_policy);
@@ -753,51 +730,35 @@ mod fuse_integration_tests {
         
         mfs_fs.file_manager.create_file(Path::new("mfs_test.txt"), b"MFS test").unwrap();
         
-        // Verify FF file went to first branch
-        assert!(temp1.path().join("ff_test.txt").exists(), "FF policy should use first branch");
-        assert!(!temp2.path().join("ff_test.txt").exists(), "FF policy should not use second branch");
+        let paths = setup.get_paths();
+        
+        // Verify FF file went to first branch (regardless of less space)
+        assert!(paths[0].join("ff_test.txt").exists(), "FF policy should use first branch");
+        assert!(!paths[1].join("ff_test.txt").exists(), "FF policy should not use second branch");
         
         // Verify MFS file went to second branch (more free space)
-        assert!(temp2.path().join("mfs_test.txt").exists(), "MFS policy should use branch with more free space");
-        assert!(!temp1.path().join("mfs_test.txt").exists(), "MFS policy should not use branch with less free space");
+        assert!(paths[1].join("mfs_test.txt").exists(), "MFS policy should use branch with more free space (60MB)");
+        assert!(!paths[0].join("mfs_test.txt").exists(), "MFS policy should not use branch with less free space (20MB)");
     }
     
     #[test]
     #[serial]
     fn test_fuse_least_free_space_policy() {
-        let temp1 = TempDir::new().unwrap();
-        let temp2 = TempDir::new().unwrap();
-        let temp3 = TempDir::new().unwrap();
-
-        // Create different amounts of content to simulate different free space
-        // temp1: small file (more free space)
-        std::fs::write(temp1.path().join("existing_small.txt"), "small").unwrap();
+        use crate::test_utils::SpacePolicyTestSetup;
         
-        // temp2: large file (less free space) - LFS should pick this one
-        std::fs::write(temp2.path().join("existing_large.txt"), "x".repeat(3000)).unwrap();
+        // Create test setup with specific available space:
+        // branch 0: 15MB available (least)
+        // branch 1: 40MB available (medium)
+        // branch 2: 90MB available (most)
+        let setup = SpacePolicyTestSetup::new(15, 40, 90);
+        setup.setup_space();
         
-        // temp3: medium file
-        std::fs::write(temp3.path().join("existing_medium.txt"), "y".repeat(1000)).unwrap();
-
-        let branch1 = Arc::new(Branch::new(
-            temp1.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch2 = Arc::new(Branch::new(
-            temp2.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch3 = Arc::new(Branch::new(
-            temp3.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-
-        let branches = vec![branch1.clone(), branch3.clone(), branch2.clone()]; // Put most free space first
+        let branches = setup.get_branches();
         let policy = Box::new(LeastFreeSpaceCreatePolicy);
-        let file_manager = FileManager::new(branches, policy);
+        let file_manager = FileManager::new(branches.clone(), policy);
         let fs = MergerFS::new(file_manager);
 
-        // Create several test files - they should go to the branch with least free space (temp2)
+        // Create several test files - they should go to branch 0 (least free space)
         let test_files = vec!["lfs_test1.txt", "lfs_test2.txt", "lfs_test3.txt"];
         
         for filename in &test_files {
@@ -810,15 +771,16 @@ mod fuse_integration_tests {
             assert!(fs.file_manager.file_exists(path), "File {} should exist after LFS creation", filename);
         }
 
-        // Verify that files were created in temp2 (least free space)
+        // Verify that files were created in branch 0 (least free space - 15MB)
+        let paths = setup.get_paths();
         for filename in &test_files {
-            let path_in_temp1 = temp1.path().join(filename);
-            let path_in_temp2 = temp2.path().join(filename);
-            let path_in_temp3 = temp3.path().join(filename);
+            let path_in_branch0 = paths[0].join(filename);
+            let path_in_branch1 = paths[1].join(filename);
+            let path_in_branch2 = paths[2].join(filename);
             
-            assert!(!path_in_temp1.exists(), "File {} should NOT exist in temp1 (most free space)", filename);
-            assert!(path_in_temp2.exists(), "File {} should exist in temp2 (least free space)", filename);
-            assert!(!path_in_temp3.exists(), "File {} should NOT exist in temp3 (medium space)", filename);
+            assert!(path_in_branch0.exists(), "File {} should exist in branch 0 (15MB available - least)", filename);
+            assert!(!path_in_branch1.exists(), "File {} should NOT exist in branch 1 (40MB available)", filename);
+            assert!(!path_in_branch2.exists(), "File {} should NOT exist in branch 2 (90MB available - most)", filename);
         }
 
         // Test that we can still read all files through the union filesystem
@@ -836,67 +798,57 @@ mod fuse_integration_tests {
     #[test]
     #[serial]
     fn test_fuse_all_three_policies_comparison() {
+        use crate::test_utils::SpacePolicyTestSetup;
+        
         // Test that FF, MFS, and LFS policies all behave differently
-        let temp1 = TempDir::new().unwrap();
-        let temp2 = TempDir::new().unwrap();
-        let temp3 = TempDir::new().unwrap();
+        // Create test setup with specific available space:
+        // branch 0: 100MB available (most)
+        // branch 1: 50MB available (medium) 
+        // branch 2: 10MB available (least)
+        let setup = SpacePolicyTestSetup::new(100, 50, 10);
+        setup.setup_space();
+        
+        let branches = setup.get_branches();
+        let paths = setup.get_paths();
 
-        // Create different space usage patterns
-        std::fs::write(temp1.path().join("small.txt"), "tiny").unwrap(); // Most free space
-        std::fs::write(temp2.path().join("medium.txt"), "x".repeat(1000)).unwrap(); // Medium space
-        std::fs::write(temp3.path().join("large.txt"), "y".repeat(5000)).unwrap(); // Least free space
-
-        let branch1 = Arc::new(Branch::new(
-            temp1.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch2 = Arc::new(Branch::new(
-            temp2.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-        let branch3 = Arc::new(Branch::new(
-            temp3.path().to_path_buf(),
-            BranchMode::ReadWrite,
-        ));
-
-        // Test FirstFound policy (should use first branch - temp1)
-        let ff_branches = vec![branch1.clone(), branch2.clone(), branch3.clone()];
+        // Test FirstFound policy (should use first branch - branch 0)
+        let ff_branches = vec![branches[0].clone(), branches[1].clone(), branches[2].clone()];
         let ff_policy = Box::new(FirstFoundCreatePolicy);
         let ff_file_manager = FileManager::new(ff_branches, ff_policy);
         let ff_fs = MergerFS::new(ff_file_manager);
         
         ff_fs.file_manager.create_file(Path::new("ff_test.txt"), b"FF test").unwrap();
         
-        // Test MostFreeSpace policy (should use temp1 - most free space)
-        let mfs_branches = vec![branch1.clone(), branch2.clone(), branch3.clone()];
+        // Test MostFreeSpace policy (should use branch 0 - most free space)
+        let mfs_branches = vec![branches[0].clone(), branches[1].clone(), branches[2].clone()];
         let mfs_policy = Box::new(MostFreeSpaceCreatePolicy);
         let mfs_file_manager = FileManager::new(mfs_branches, mfs_policy);
         let mfs_fs = MergerFS::new(mfs_file_manager);
         
         mfs_fs.file_manager.create_file(Path::new("mfs_test.txt"), b"MFS test").unwrap();
         
-        // Test LeastFreeSpace policy (should use temp3 - least free space)
-        let lfs_branches = vec![branch1.clone(), branch2.clone(), branch3.clone()];
+        // Test LeastFreeSpace policy (should use branch 2 - least free space)
+        let lfs_branches = vec![branches[0].clone(), branches[1].clone(), branches[2].clone()];
         let lfs_policy = Box::new(LeastFreeSpaceCreatePolicy);
         let lfs_file_manager = FileManager::new(lfs_branches, lfs_policy);
         let lfs_fs = MergerFS::new(lfs_file_manager);
         
         lfs_fs.file_manager.create_file(Path::new("lfs_test.txt"), b"LFS test").unwrap();
         
-        // Verify FF and MFS both went to temp1 (first branch and most free space)
-        assert!(temp1.path().join("ff_test.txt").exists(), "FF policy should use first branch (temp1)");
-        assert!(temp1.path().join("mfs_test.txt").exists(), "MFS policy should use branch with most free space (temp1)");
+        // Verify FF and MFS both went to branch 0 (first branch and most free space)
+        assert!(paths[0].join("ff_test.txt").exists(), "FF policy should use first branch (branch 0)");
+        assert!(paths[0].join("mfs_test.txt").exists(), "MFS policy should use branch with most free space (branch 0)");
         
-        // Verify LFS went to temp3 (least free space)
-        assert!(temp3.path().join("lfs_test.txt").exists(), "LFS policy should use branch with least free space (temp3)");
+        // Verify LFS went to branch 2 (least free space)
+        assert!(paths[2].join("lfs_test.txt").exists(), "LFS policy should use branch with least free space (branch 2)");
         
         // Verify the other branches don't have the wrong files
-        assert!(!temp2.path().join("ff_test.txt").exists(), "FF should not use temp2");
-        assert!(!temp3.path().join("ff_test.txt").exists(), "FF should not use temp3");
-        assert!(!temp2.path().join("mfs_test.txt").exists(), "MFS should not use temp2");
-        assert!(!temp3.path().join("mfs_test.txt").exists(), "MFS should not use temp3");
-        assert!(!temp1.path().join("lfs_test.txt").exists(), "LFS should not use temp1");
-        assert!(!temp2.path().join("lfs_test.txt").exists(), "LFS should not use temp2");
+        assert!(!paths[1].join("ff_test.txt").exists(), "FF should not use branch 1");
+        assert!(!paths[2].join("ff_test.txt").exists(), "FF should not use branch 2");
+        assert!(!paths[1].join("mfs_test.txt").exists(), "MFS should not use branch 1");
+        assert!(!paths[2].join("mfs_test.txt").exists(), "MFS should not use branch 2");
+        assert!(!paths[0].join("lfs_test.txt").exists(), "LFS should not use branch 0");
+        assert!(!paths[1].join("lfs_test.txt").exists(), "LFS should not use branch 1");
     }
 
     #[test]

@@ -346,7 +346,9 @@ class FuzzTester:
             for file_path in mountpoint.rglob("*"):
                 if file_path.is_file():
                     rel_path = file_path.relative_to(mountpoint)
-                    all_files.add(str(rel_path))
+                    # Skip .mergerfs control file as it's virtual
+                    if str(rel_path) != ".mergerfs":
+                        all_files.add(str(rel_path))
             
             # Check each file exists in exactly one branch
             for file_rel_path in all_files:
@@ -530,7 +532,10 @@ class TestFuzzFoundation:
         for policy in policies:
             print(f"Testing fuzz with policy: {policy}")
             
-            config = FuseConfig(policy=policy, branches=temp_branches, mountpoint=temp_mountpoint)
+            # Create unique mountpoint for each policy
+            policy_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_{policy}"
+            
+            config = FuseConfig(policy=policy, branches=temp_branches, mountpoint=policy_mountpoint)
             fuzz_tester = FuzzTester(fuse_manager, config, seed=54321)
             
             results = fuzz_tester.run_fuzz_session(num_operations=15, check_invariants_every=5)

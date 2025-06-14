@@ -39,7 +39,7 @@ import os
 import time
 from pathlib import Path
 from typing import List, Set, Dict
-from hypothesis import given, strategies as st, settings, assume, note
+from hypothesis import given, strategies as st, settings, assume, note, HealthCheck
 from hypothesis.stateful import RuleBasedStateMachine, initialize, rule, precondition, invariant
 
 from lib.fuse_manager import FuseManager, FuseConfig, FileSystemState
@@ -69,7 +69,7 @@ class TestPolicyProperties:
         filenames=st.lists(valid_filename, min_size=1, max_size=10, unique=True),
         policy=policy_strategy
     )
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_policy_file_placement_consistency(
         self, 
         fuse_manager: FuseManager, 
@@ -119,7 +119,7 @@ class TestPolicyProperties:
         file_sizes_list=st.lists(file_sizes, min_size=3, max_size=3),  # One for each branch
         new_files=st.lists(valid_filename, min_size=1, max_size=5, unique=True)
     )
-    @settings(max_examples=15, deadline=None)
+    @settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_space_based_policy_properties(
         self,
         fuse_manager: FuseManager,
@@ -141,7 +141,8 @@ class TestPolicyProperties:
         note(f"Initial branch sizes: {initial_sizes}")
         
         # Test MFS policy
-        mfs_config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
+        mfs_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_mfs"
+        mfs_config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=mfs_mountpoint)
         with fuse_manager.mounted_fs(mfs_config) as (process, mountpoint, branches):
             for filename in new_files:
                 file_path = mountpoint / filename
@@ -155,7 +156,8 @@ class TestPolicyProperties:
                 note(f"MFS selected branch {selected_branch} for {filename}")
         
         # Test LFS policy  
-        lfs_config = FuseConfig(policy="lfs", branches=temp_branches, mountpoint=temp_mountpoint)
+        lfs_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_lfs"
+        lfs_config = FuseConfig(policy="lfs", branches=temp_branches, mountpoint=lfs_mountpoint)
         with fuse_manager.mounted_fs(lfs_config) as (process, mountpoint, branches):
             for filename in new_files:
                 lfs_filename = f"lfs_{filename}"
@@ -173,7 +175,7 @@ class TestPolicyProperties:
         directory_names=st.lists(valid_filename, min_size=1, max_size=5, unique=True),
         policy=policy_strategy
     )
-    @settings(max_examples=15, deadline=None)
+    @settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_directory_creation_properties(
         self,
         fuse_manager: FuseManager,
@@ -184,7 +186,10 @@ class TestPolicyProperties:
         policy: str
     ):
         """Test that directory creation follows the same rules as file creation."""
-        config = FuseConfig(policy=policy, branches=temp_branches, mountpoint=temp_mountpoint)
+        # Create unique mountpoint for each test run
+        import uuid
+        unique_mountpoint = temp_mountpoint.parent / f"{temp_mountpoint.name}_{policy}_{uuid.uuid4().hex[:8]}"
+        config = FuseConfig(policy=policy, branches=temp_branches, mountpoint=unique_mountpoint)
         
         with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
             for dirname in directory_names:
@@ -315,7 +320,7 @@ class TestFileSystemProperties:
             max_size=20
         )
     )
-    @settings(max_examples=10, deadline=None)
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_filesystem_operation_sequence(
         self,
         fuse_manager: FuseManager,
@@ -387,7 +392,7 @@ class TestPerformanceProperties:
     """Property-based performance testing."""
     
     @given(file_count=st.integers(min_value=10, max_value=100))
-    @settings(max_examples=3, deadline=None)
+    @settings(max_examples=3, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_create_performance_scales_linearly(
         self,
         fuse_manager: FuseManager,

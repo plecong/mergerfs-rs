@@ -14,6 +14,13 @@ impl DiskSpace {
     /// Uses statvfs to get f_bavail for accurate available space calculation
     /// This matches mergerfs behavior which uses f_bavail to respect filesystem reservations
     pub fn for_path(path: &Path) -> Result<DiskSpace, io::Error> {
+        // In test mode, check for mock space markers first
+        #[cfg(test)]
+        {
+            if let Ok(space) = crate::test_utils::get_test_disk_space(path) {
+                return Ok(space);
+            }
+        }
         #[cfg(unix)]
         {
             use nix::sys::statvfs::statvfs;

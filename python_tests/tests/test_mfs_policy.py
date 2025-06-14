@@ -22,20 +22,17 @@ class TestMFSPolicyBasic:
     def test_mfs_selects_empty_branch_over_populated(
         self,
         fuse_manager: FuseManager,
-        temp_branches: List[Path],
+        tmpfs_branches: List[Path],
         temp_mountpoint: Path,
         fs_state: FileSystemState
     ):
         """Test that MFS prefers empty branches over populated ones."""
-        # Pre-populate first branch with data
-        fs_state.create_file_with_size(temp_branches[0] / "large_file.dat", 5000)
-        # Leave other branches empty
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
-        # Debug: Verify large file was created
-        print(f"Large file exists: {(temp_branches[0] / 'large_file.dat').exists()}")
-        print(f"Large file size: {(temp_branches[0] / 'large_file.dat').stat().st_size}")
-        
-        config = FuseConfig(policy="mfs", branches=temp_branches, mountpoint=temp_mountpoint)
+        config = FuseConfig(policy="mfs", branches=tmpfs_branches, mountpoint=temp_mountpoint)
         
         # Try mounting directly like in the debug script
         process = fuse_manager.mount(config)
@@ -69,19 +66,13 @@ class TestMFSPolicyBasic:
                 branch_file = branch / "mfs_test.txt"
                 print(f"Branch {i}: file exists = {branch_file.exists()}")
             
-            # Also check temp_branches to ensure they're the same
-            print("\nChecking temp_branches:")
-            for i, branch in enumerate(temp_branches):
-                branch_file = branch / "mfs_test.txt"
-                print(f"Temp branch {i}: file exists = {branch_file.exists()}")
-            
             # Check which branch contains the file
             locations = fs_state.get_file_locations(branches, "mfs_test.txt")
             assert len(locations) == 1, f"File should exist in exactly one branch, found in {len(locations)} branches"
             
-            # Should not be in the populated branch (branch 0)
-            assert locations[0] != 0, f"MFS should avoid populated branch 0, but used branch {locations[0]}"
-            print(f"MFS correctly selected branch {locations[0]} instead of populated branch 0")
+            # Should be in branch 2 (most free space - 90MB)
+            assert locations[0] == 2, f"MFS should select branch 2 (most free space), but used branch {locations[0]}"
+            print(f"MFS correctly selected branch {locations[0]} (most free space)")
         finally:
             fuse_manager.unmount(mountpoint)
     

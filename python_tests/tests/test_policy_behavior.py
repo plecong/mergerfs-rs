@@ -45,58 +45,58 @@ class TestCreatePolicies:
                 for filename in test_files:
                     assert not (branch / filename).exists(), f"File {filename} should not exist in branch {i}"
     
-    def test_mostfreespace_policy_selection(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
+    def test_mostfreespace_policy_selection(self, fuse_manager: FuseManager, tmpfs_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
         """Test MostFreeSpace policy selects branch with most available space."""
-        # Pre-populate branches with different amounts of data
-        fs_state.create_file_with_size(temp_branches[0] / "large_existing.dat", 5000)  # Less free space
-        fs_state.create_file_with_size(temp_branches[1] / "small_existing.dat", 100)   # More free space  
-        fs_state.create_file_with_size(temp_branches[2] / "medium_existing.dat", 1000) # Medium space
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
         config = FuseConfig(
             policy="mfs",
-            branches=temp_branches,
+            branches=tmpfs_branches,
             mountpoint=temp_mountpoint
         )
         
         with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
-            # Create test files - should go to branch with most free space (branch 1)
+            # Create test files - should go to branch with most free space (branch 2)
             test_files = ["mfs_test1.txt", "mfs_test2.txt"]
             
             for filename in test_files:
                 file_path = mountpoint / filename
                 file_path.write_text(f"MFS content: {filename}")
                 
-            # Verify files went to branch with most free space (branch 1)
+            # Verify files went to branch with most free space (branch 2)
             for filename in test_files:
                 locations = fs_state.get_file_locations(branches, filename)
-                assert 1 in locations, f"File {filename} should be in branch 1 (most free space), found in: {locations}"
+                assert 2 in locations, f"File {filename} should be in branch 2 (most free space - 90MB), found in: {locations}"
                 assert len(locations) == 1, f"File {filename} should only be in one branch, found in: {locations}"
     
-    def test_leastfreespace_policy_selection(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
+    def test_leastfreespace_policy_selection(self, fuse_manager: FuseManager, tmpfs_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
         """Test LeastFreeSpace policy selects branch with least available space."""
-        # Pre-populate branches with different amounts of data
-        fs_state.create_file_with_size(temp_branches[0] / "small_existing.dat", 100)   # Most free space
-        fs_state.create_file_with_size(temp_branches[1] / "medium_existing.dat", 1000) # Medium space
-        fs_state.create_file_with_size(temp_branches[2] / "large_existing.dat", 5000)  # Least free space
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
         config = FuseConfig(
             policy="lfs",
-            branches=temp_branches,
+            branches=tmpfs_branches,
             mountpoint=temp_mountpoint
         )
         
         with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
-            # Create test files - should go to branch with least free space (branch 2)
+            # Create test files - should go to branch with least free space (branch 0)
             test_files = ["lfs_test1.txt", "lfs_test2.txt"]
             
             for filename in test_files:
                 file_path = mountpoint / filename
                 file_path.write_text(f"LFS content: {filename}")
                 
-            # Verify files went to branch with least free space (branch 2)
+            # Verify files went to branch with least free space (branch 0)
             for filename in test_files:
                 locations = fs_state.get_file_locations(branches, filename)
-                assert 2 in locations, f"File {filename} should be in branch 2 (least free space), found in: {locations}"
+                assert 0 in locations, f"File {filename} should be in branch 0 (least free space - 8MB), found in: {locations}"
                 assert len(locations) == 1, f"File {filename} should only be in one branch, found in: {locations}"
     
     @pytest.mark.parametrize("policy", ["ff", "mfs", "lfs", "rand"])
@@ -118,12 +118,12 @@ class TestCreatePolicies:
             read_content = test_file.read_text()
             assert read_content == test_content, f"Content mismatch for {policy} policy"
     
-    def test_policy_comparison_same_filesystem(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
+    def test_policy_comparison_same_filesystem(self, fuse_manager: FuseManager, tmpfs_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
         """Test that different policies behave differently on the same filesystem setup."""
-        # Create a specific setup: branch 0 has most space, branch 2 has least space
-        fs_state.create_file_with_size(temp_branches[0] / "small.dat", 500)   # Most free space
-        fs_state.create_file_with_size(temp_branches[1] / "medium.dat", 2000) # Medium space  
-        fs_state.create_file_with_size(temp_branches[2] / "large.dat", 8000)  # Least free space
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
         results = {}
         
@@ -134,7 +134,7 @@ class TestCreatePolicies:
             
             config = FuseConfig(
                 policy=policy,
-                branches=temp_branches,
+                branches=tmpfs_branches,
                 mountpoint=policy_mountpoint
             )
             
@@ -148,8 +148,8 @@ class TestCreatePolicies:
         
         # Verify each policy made expected choices
         assert results["ff"] == 0, "FirstFound should use first branch (0)"
-        assert results["mfs"] == 0, "MostFreeSpace should use branch with most space (0)"  
-        assert results["lfs"] == 2, "LeastFreeSpace should use branch with least space (2)"
+        assert results["mfs"] == 2, "MostFreeSpace should use branch with most space (2)"  
+        assert results["lfs"] == 0, "LeastFreeSpace should use branch with least space (0)"
         assert results["rand"] in [0, 1, 2], "Random should use one of the available branches"
         
         # Verify MFS and LFS made different choices
@@ -217,18 +217,17 @@ class TestUnionBehavior:
 class TestDirectoryOperations:
     """Test directory operations with different policies."""
     
-    def test_directory_creation_policies(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
+    def test_directory_creation_policies(self, fuse_manager: FuseManager, tmpfs_branches: List[Path], temp_mountpoint: Path, fs_state: FileSystemState):
         """Test that directory creation follows the same policy as file creation."""
-        # Setup different space usage: branch 0 small file, branch 1 large file, branch 2 medium file
-        # So branch 0 has most free space, branch 1 has least free space
-        fs_state.create_file_with_size(temp_branches[0] / "existing.dat", 1000)   # Most free space
-        fs_state.create_file_with_size(temp_branches[1] / "existing.dat", 5000)   # Least free space
-        fs_state.create_file_with_size(temp_branches[2] / "existing.dat", 3000)   # Medium free space
+        # tmpfs_branches are pre-configured with:
+        # branch 0: 8MB free (least)
+        # branch 1: 40MB free (medium)
+        # branch 2: 90MB free (most)
         
         # Test MFS policy with directories
         config = FuseConfig(
             policy="mfs",
-            branches=temp_branches,
+            branches=tmpfs_branches,
             mountpoint=temp_mountpoint
         )
         
@@ -241,13 +240,13 @@ class TestDirectoryOperations:
             test_file = test_dir / "file_in_dir.txt"
             test_file.write_text("Content in directory")
             
-            # Directory should be created in branch with most free space (branch 0)
-            assert (branches[0] / "test_directory").exists(), "Directory should exist in branch 0 (most free space)"
+            # Directory should be created in branch with most free space (branch 2)
+            assert (branches[2] / "test_directory").exists(), "Directory should exist in branch 2 (most free space - 90MB)"
+            assert not (branches[0] / "test_directory").exists(), "Directory should not exist in branch 0"
             assert not (branches[1] / "test_directory").exists(), "Directory should not exist in branch 1"
-            assert not (branches[2] / "test_directory").exists(), "Directory should not exist in branch 2"
             
             # File should also be in the same branch
-            assert (branches[0] / "test_directory" / "file_in_dir.txt").exists(), "File should exist in same branch as directory"
+            assert (branches[2] / "test_directory" / "file_in_dir.txt").exists(), "File should exist in same branch as directory"
     
     def test_nested_directory_creation(self, fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path):
         """Test nested directory creation."""
