@@ -11,29 +11,52 @@ pub struct DiskSpace {
 
 impl DiskSpace {
     /// Get disk space information for a given path
-    /// Uses a portable approach compatible with Alpine Linux/MUSL
+    /// Uses statvfs to get f_bavail for accurate available space calculation
+    /// This matches mergerfs behavior which uses f_bavail to respect filesystem reservations
     pub fn for_path(path: &Path) -> Result<DiskSpace, io::Error> {
-        // For Alpine Linux compatibility, we'll use a simplified approach
-        // that uses filesystem metadata to estimate space usage
+        #[cfg(unix)]
+        {
+            use nix::sys::statvfs::statvfs;
+            
+            // Use nix crate for portable statvfs support
+            let stat = statvfs(path)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            
+            // Calculate space using f_bavail (available blocks for unprivileged users)
+            // This respects filesystem reservations, unlike f_bfree
+            // This matches the C++ mergerfs implementation behavior
+            let block_size = stat.fragment_size() as u64;
+            let total = stat.blocks() as u64 * block_size;
+            let available = stat.blocks_available() as u64 * block_size;  // f_bavail
+            let free = stat.blocks_free() as u64 * block_size;  // f_bfree
+            let used = total.saturating_sub(free);
+            
+            tracing::trace!(
+                "DiskSpace for {:?}: total={}, available={} (f_bavail), free={} (f_bfree), used={}", 
+                path, total, available, free, used
+            );
+            
+            Ok(DiskSpace {
+                total,
+                available,
+                used,
+            })
+        }
         
-        // Get the directory metadata
-        let _metadata = fs::metadata(path)?;
-        
-        // For testing and Alpine compatibility, we'll simulate disk space calculation
-        // In a real production system, you would use the `nix` crate or platform-specific APIs
-        
-        // Calculate estimated disk usage based on directory content
-        let estimated_used = Self::calculate_directory_size(path).unwrap_or(0);
-        
-        // Use reasonable defaults for Alpine/container environments
-        let total: u64 = 10 * 1024 * 1024 * 1024; // 10GB total
-        let available = total.saturating_sub(estimated_used);
-        
-        Ok(DiskSpace {
-            total,
-            available,
-            used: estimated_used,
-        })
+        #[cfg(not(unix))]
+        {
+            // Fallback for non-Unix systems
+            let _metadata = fs::metadata(path)?;
+            let estimated_used = Self::calculate_directory_size(path).unwrap_or(0);
+            let total: u64 = 10 * 1024 * 1024 * 1024; // 10GB total
+            let available = total.saturating_sub(estimated_used);
+            
+            Ok(DiskSpace {
+                total,
+                available,
+                used: estimated_used,
+            })
+        }
     }
     
     /// Calculate the total size of files in a directory (recursive)

@@ -156,7 +156,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Policy testing (all implemented policies)
 - ✅ Branch management (readonly, readwrite)
 - ✅ Extended attributes (xattr)
-- ❌ Symbolic links
+- ✅ Symbolic links (detection and metadata preservation)
 - ❌ Hard links
 - ❌ Special files
 - ❌ Runtime configuration
@@ -184,6 +184,19 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Thread-safe implementations using Arc/RwLock
 - Policy-driven design for flexibility
 - Alpine Linux/MUSL compatibility
+
+## Implementation Details
+
+### Space Calculation
+- Uses `f_bavail` (blocks available to unprivileged users) instead of `f_bfree` for space calculations
+- This matches the C++ mergerfs behavior and respects filesystem reservations
+- Implemented using the `nix` crate for portable `statvfs` support
+- See `docs/SPACE_CALCULATION.md` for detailed information
+
+### Symlink Handling
+- Uses `symlink_metadata()` instead of `metadata()` to preserve symlink attributes
+- Properly detects and reports symlinks as `FileType::Symlink` in FUSE operations
+- Matches C++ implementation's default behavior (follow_symlinks=NEVER)
 
 ## Resources
 
