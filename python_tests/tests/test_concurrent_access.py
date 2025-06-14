@@ -228,11 +228,9 @@ class TestConcurrentFileOperations:
                     }
                 finally:
                     # Clean up the policy-specific mountpoint
-                    if policy_mountpoint.exists():
-                        try:
-                            policy_mountpoint.rmdir()
-                        except:
-                            pass
+                    # Note: Don't access the mountpoint after unmounting - it may cause ENOTCONN
+                    # The FuseManager cleanup will handle removing temp directories
+                    pass
         
         # Test all policies concurrently
         policies = ["ff", "mfs", "lfs"]

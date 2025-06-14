@@ -130,10 +130,18 @@ class FuseManager:
         try:
             process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True
             )
+            
+            # Give the process a moment to start
+            time.sleep(0.5)
+            
+            # Check if process is still running
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise RuntimeError(f"FUSE process exited immediately with code {process.returncode}\nstdout: {stdout}\nstderr: {stderr}")
             
             # Wait for mount to be ready
             self._wait_for_mount(config.mountpoint, config.timeout)
