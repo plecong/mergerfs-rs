@@ -1767,11 +1767,13 @@ impl Filesystem for MergerFS {
         rdev: u32,
         reply: ReplyEntry,
     ) {
-        info!("mknod: parent={}, name={:?}, mode={:o}, rdev={}", parent, name, mode, rdev);
+        let _span = tracing::info_span!("fuse::mknod", parent = parent, name = ?name, mode = format!("{:o}", mode), rdev = rdev).entered();
+        tracing::info!("Creating special file in parent inode");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
             None => {
+                tracing::debug!("Parent inode {} not found", parent);
                 reply.error(ENOENT);
                 return;
             }
@@ -1780,6 +1782,7 @@ impl Filesystem for MergerFS {
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
+                tracing::debug!("Invalid file name encoding");
                 reply.error(EINVAL);
                 return;
             }
@@ -1791,37 +1794,60 @@ impl Filesystem for MergerFS {
             format!("{}/{}", parent_data.path, name_str)
         };
 
-        // For now, we only support regular files through mknod
-        // Special files (devices, pipes, sockets) are not supported
-        if (mode & 0o170000) == 0o100000 {
-            // Regular file - create it like create()
-            let path = Path::new(&file_path);
-            match self.file_manager.create_file(path, &[]) {
-                Ok(_) => {
-                    if let Some(mut attr) = self.create_file_attr(path) {
-                        let ino = self.allocate_inode();
-                        attr.ino = ino;
-                        attr.perm = (mode & 0o7777) as u16;
-
-                        let inode_data = InodeData {
-                            path: file_path,
-                            attr,
-                        };
-
-                        self.inodes.write().insert(ino, inode_data);
-                        reply.entry(&TTL, &attr, 0);
-                    } else {
-                        reply.error(EIO);
+        let path = Path::new(&file_path);
+        
+        // Log the file type being created
+        let file_type_str = match mode & 0o170000 {
+            0o010000 => "FIFO",
+            0o020000 => "character device",
+            0o060000 => "block device",
+            0o100000 => "regular file",
+            0o140000 => "socket",
+            _ => "unknown",
+        };
+        tracing::debug!("File type: {}, permissions: {:o}", file_type_str, mode & 0o7777);
+        
+        // Use the new create_special_file method for all file types
+        match self.file_manager.create_special_file(path, mode, rdev) {
+            Ok(_) => {
+                // Get attributes for the newly created file
+                if let Some(mut attr) = self.create_file_attr(path) {
+                    let ino = self.allocate_inode();
+                    attr.ino = ino;
+                    attr.perm = (mode & 0o7777) as u16;
+                    
+                    // Set the correct file type in attributes
+                    attr.kind = match mode & 0o170000 {
+                        0o010000 => fuser::FileType::NamedPipe,
+                        0o020000 => fuser::FileType::CharDevice,
+                        0o060000 => fuser::FileType::BlockDevice,
+                        0o100000 => fuser::FileType::RegularFile,
+                        0o140000 => fuser::FileType::Socket,
+                        _ => fuser::FileType::RegularFile,
+                    };
+                    
+                    // For device files, set the rdev
+                    if matches!(attr.kind, fuser::FileType::CharDevice | fuser::FileType::BlockDevice) {
+                        attr.rdev = rdev;
                     }
-                }
-                Err(e) => {
-                    error!("Failed to create file: {:?}", e);
-                    reply.error(e.errno());
+
+                    let inode_data = InodeData {
+                        path: file_path,
+                        attr,
+                    };
+
+                    self.inodes.write().insert(ino, inode_data);
+                    tracing::info!("Special file created successfully with inode {}", ino);
+                    reply.entry(&TTL, &attr, 0);
+                } else {
+                    tracing::error!("Failed to get attributes for created file");
+                    reply.error(EIO);
                 }
             }
-        } else {
-            // Special files not supported
-            reply.error(ENOSYS);
+            Err(e) => {
+                tracing::error!("Failed to create special file: {:?}", e);
+                reply.error(e.errno());
+            }
         }
     }
 

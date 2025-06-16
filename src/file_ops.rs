@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use nix::sys::stat::{mknod as nix_mknod, Mode, SFlag};
+use nix::unistd::mkfifo;
 
 pub struct FileManager {
     pub branches: Vec<Arc<Branch>>,
@@ -373,6 +375,99 @@ impl FileManager {
         
         Ok(())
     }
+
+    pub fn create_special_file(&self, path: &Path, mode: u32, rdev: u32) -> Result<(), PolicyError> {
+        let _span = tracing::info_span!("file_ops::create_special_file", path = ?path, mode = mode, rdev = rdev).entered();
+        
+        // Select branch for new special file using create policy
+        tracing::debug!("Selecting branch for new special file using create policy");
+        let branch = self.create_policy.select_branch(&self.branches, path)?;
+        let full_path = branch.full_path(path);
+        
+        tracing::info!("Selected branch {:?} for creating special file {:?}", branch.path, path);
+        tracing::debug!("Full path will be: {:?}", full_path);
+        
+        // Find a branch that has the parent directory to use as template for cloning
+        let parent_path = path.parent().unwrap_or_else(|| Path::new("/"));
+        let template_branch = self.find_first_branch(parent_path).ok();
+        
+        // Clone parent directory structure from template branch if available
+        if let Some(ref template) = template_branch {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    use crate::fs_utils;
+                    if let Err(e) = fs_utils::clone_path(&template.path, &branch.path, parent) {
+                        tracing::warn!("Failed to clone parent path structure: {:?}", e);
+                        // Fall back to simple directory creation
+                        if let Some(parent_dir) = full_path.parent() {
+                            std::fs::create_dir_all(parent_dir)?;
+                        }
+                    }
+                }
+            }
+        } else {
+            // No template found, just create parent directories
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        
+        // Determine file type from mode
+        let file_type = match mode & 0o170000 {
+            0o010000 => SFlag::S_IFIFO,   // FIFO/named pipe
+            0o020000 => SFlag::S_IFCHR,   // Character device
+            0o060000 => SFlag::S_IFBLK,   // Block device
+            0o100000 => SFlag::S_IFREG,   // Regular file
+            0o140000 => SFlag::S_IFSOCK,  // Socket
+            _ => {
+                tracing::error!("Unsupported file type in mode: {:o}", mode);
+                return Err(PolicyError::from(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Unsupported file type"
+                )));
+            }
+        };
+        
+        // Extract permission bits
+        let permissions = Mode::from_bits_truncate(mode & 0o7777);
+        
+        // Create the special file
+        match file_type {
+            SFlag::S_IFIFO => {
+                // Use mkfifo for named pipes (simpler API)
+                tracing::info!("Creating FIFO at {:?} with permissions {:o}", full_path, mode & 0o7777);
+                mkfifo(&full_path, permissions)
+                    .map_err(|e| {
+                        let errno = e as i32;
+                        PolicyError::from(std::io::Error::from_raw_os_error(errno))
+                    })?;
+            }
+            SFlag::S_IFREG => {
+                // Regular file - use standard file creation
+                tracing::info!("Creating regular file at {:?} with permissions {:o}", full_path, mode & 0o7777);
+                let file = File::create(&full_path)?;
+                // Set permissions
+                use std::os::unix::fs::PermissionsExt;
+                let metadata = file.metadata()?;
+                let mut perms = metadata.permissions();
+                perms.set_mode(mode & 0o7777);
+                std::fs::set_permissions(&full_path, perms)?;
+            }
+            _ => {
+                // Use mknod for device files and sockets
+                tracing::info!("Creating special file at {:?} with type {:?}, permissions {:o}, device {:x}", 
+                    full_path, file_type, mode & 0o7777, rdev);
+                nix_mknod(&full_path, file_type, permissions, rdev as u64)
+                    .map_err(|e| {
+                        let errno = e as i32;
+                        PolicyError::from(std::io::Error::from_raw_os_error(errno))
+                    })?;
+            }
+        }
+        
+        tracing::info!("Special file created successfully at {:?}", full_path);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +477,7 @@ mod tests {
     use crate::policy::FirstFoundCreatePolicy;
     use std::path::Path;
     use tempfile::TempDir;
+    use std::os::unix::fs::FileTypeExt;
 
     fn setup_test_branches() -> (Vec<TempDir>, Vec<Arc<Branch>>) {
         let temp1 = TempDir::new().unwrap();
@@ -595,6 +691,110 @@ mod tests {
                 assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
             }
             _ => panic!("Expected permission denied error"),
+        }
+    }
+
+    #[test]
+    fn test_create_special_file_fifo() {
+        let (_temps, branches) = setup_test_branches();
+        let file_manager = FileManager::new(
+            branches,
+            Box::new(FirstFoundCreatePolicy::new()),
+        );
+        
+        // Create a FIFO (named pipe)
+        let fifo_path = Path::new("test.fifo");
+        let mode = 0o010644; // S_IFIFO | 0644
+        let result = file_manager.create_special_file(fifo_path, mode, 0);
+        assert!(result.is_ok());
+        
+        // Verify the FIFO was created in the first branch
+        let branch = &file_manager.branches[0];
+        let full_path = branch.full_path(fifo_path);
+        assert!(full_path.exists());
+        
+        // Verify it's actually a FIFO
+        let metadata = std::fs::metadata(&full_path).unwrap();
+        assert!(metadata.file_type().is_fifo());
+    }
+
+    #[test]
+    fn test_create_special_file_regular() {
+        let (_temps, branches) = setup_test_branches();
+        let file_manager = FileManager::new(
+            branches,
+            Box::new(FirstFoundCreatePolicy::new()),
+        );
+        
+        // Create a regular file through mknod
+        let file_path = Path::new("test_regular.txt");
+        let mode = 0o100644; // S_IFREG | 0644
+        let result = file_manager.create_special_file(file_path, mode, 0);
+        assert!(result.is_ok());
+        
+        // Verify the file was created
+        let branch = &file_manager.branches[0];
+        let full_path = branch.full_path(file_path);
+        assert!(full_path.exists());
+        assert!(full_path.is_file());
+        
+        // Verify permissions
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&full_path).unwrap();
+        let perms = metadata.permissions().mode();
+        assert_eq!(perms & 0o777, 0o644);
+    }
+
+    #[test]
+    fn test_create_special_file_with_parent_creation() {
+        let (_temps, branches) = setup_test_branches();
+        let file_manager = FileManager::new(
+            branches,
+            Box::new(FirstFoundCreatePolicy::new()),
+        );
+        
+        // Create a FIFO in a subdirectory that doesn't exist
+        let fifo_path = Path::new("subdir/test.fifo");
+        let mode = 0o010644; // S_IFIFO | 0644
+        let result = file_manager.create_special_file(fifo_path, mode, 0);
+        assert!(result.is_ok());
+        
+        // Verify the parent directory was created
+        let branch = &file_manager.branches[0];
+        let parent_path = branch.full_path(Path::new("subdir"));
+        assert!(parent_path.exists());
+        assert!(parent_path.is_dir());
+        
+        // Verify the FIFO exists
+        let full_path = branch.full_path(fifo_path);
+        assert!(full_path.exists());
+        let metadata = std::fs::metadata(&full_path).unwrap();
+        assert!(metadata.file_type().is_fifo());
+    }
+
+    #[test] 
+    fn test_create_special_file_readonly_branch() {
+        let temp1 = TempDir::new().unwrap();
+        let branches = vec![
+            Arc::new(Branch::new(temp1.path().to_path_buf(), BranchMode::ReadOnly)),
+        ];
+        
+        let file_manager = FileManager::new(
+            branches,
+            Box::new(FirstFoundCreatePolicy::new()),
+        );
+        
+        // Try to create a FIFO in readonly branch
+        let fifo_path = Path::new("test.fifo");
+        let mode = 0o010644; // S_IFIFO | 0644
+        let result = file_manager.create_special_file(fifo_path, mode, 0);
+        
+        // Should fail with ReadOnlyFilesystem
+        assert!(result.is_err());
+        match result {
+            Err(PolicyError::ReadOnlyFilesystem) => {},
+            Err(e) => panic!("Expected ReadOnlyFilesystem error, got: {:?}", e),
+            _ => panic!("Expected error"),
         }
     }
 }
