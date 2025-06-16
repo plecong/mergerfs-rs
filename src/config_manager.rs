@@ -173,21 +173,21 @@ impl ConfigOption for CreatePolicyOption {
     fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
         // Validate policy name
         match value {
-            "ff" | "mfs" | "lfs" | "rand" | "epmfs" => {
+            "ff" | "mfs" | "lfs" | "lus" | "rand" | "epmfs" | "eplfs" | "pfrd" => {
                 *self.current_value.write() = value.to_string();
                 // TODO: Actually update the policy in file_manager
                 // This will require modifying FileManager to support runtime policy changes
                 Ok(())
             }
             _ => Err(ConfigError::InvalidValue(format!(
-                "Unknown create policy: {}. Valid options: ff, mfs, lfs, rand, epmfs",
+                "Unknown create policy: {}. Valid options: ff, mfs, lfs, lus, rand, epmfs, eplfs, pfrd",
                 value
             ))),
         }
     }
     
     fn help(&self) -> &str {
-        "Create policy: ff (first found), mfs (most free space), lfs (least free space), rand (random), epmfs (existing path most free space)"
+        "Create policy: ff (first found), mfs (most free space), lfs (least free space), lus (least used space), rand (random), epmfs (existing path most free space), eplfs (existing path least free space), pfrd (proportional fill random distribution)"
     }
 }
 
@@ -230,7 +230,7 @@ impl ConfigOption for MoveOnENOSPCOption {
                 Ok(())
             }
             // Check if it's a valid policy name
-            "ff" | "mfs" | "lfs" | "rand" | "epmfs" | "pfrd" => {
+            "ff" | "mfs" | "lfs" | "lus" | "rand" | "epmfs" | "eplfs" | "pfrd" => {
                 config.moveonenospc.enabled = true;
                 config.moveonenospc.policy_name = value.to_string();
                 Ok(())
@@ -243,7 +243,7 @@ impl ConfigOption for MoveOnENOSPCOption {
     }
     
     fn help(&self) -> &str {
-        "Move files to another branch on ENOSPC. Values: true, false, or a create policy name (ff, mfs, lfs, rand, epmfs, pfrd)"
+        "Move files to another branch on ENOSPC. Values: true, false, or a create policy name (ff, mfs, lfs, lus, rand, epmfs, eplfs, pfrd)"
     }
 }
 

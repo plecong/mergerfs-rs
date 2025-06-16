@@ -21,6 +21,7 @@ pub use create::{
     MostFreeSpaceCreatePolicy,
     RandomCreatePolicy,
     ExistingPathMostFreeSpaceCreatePolicy,
+    ExistingPathLeastFreeSpaceCreatePolicy,
     ProportionalFillRandomDistributionCreatePolicy,
 };
 
@@ -39,6 +40,7 @@ pub fn create_policy_from_name(name: &str) -> Option<Box<dyn CreatePolicy>> {
         "lus" => Some(Box::new(LeastUsedSpaceCreatePolicy::new())),
         "rand" => Some(Box::new(RandomCreatePolicy::new())),
         "epmfs" => Some(Box::new(ExistingPathMostFreeSpaceCreatePolicy::new())),
+        "eplfs" => Some(Box::new(ExistingPathLeastFreeSpaceCreatePolicy::new())),
         "pfrd" => Some(Box::new(ProportionalFillRandomDistributionCreatePolicy::new())),
         _ => None,
     }
