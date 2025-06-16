@@ -13,10 +13,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 23 of 40+ implemented (57.5%)
+- **FUSE Operations**: 24 of 40+ implemented (60%)
 - **Policies**: 8 of 36 implemented (22%)
 - **Special Features**: 3 of 10+ implemented (30%)
-- **Test Coverage**: 161 tests passing (151 Rust + 10 Python)
+- **Test Coverage**: 162 tests passing (154 Rust + 8 Python)
 
 ## Implementation Status by Component
 
@@ -31,7 +31,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Permission checking utilities for access control
 - [x] Comprehensive tracing/logging infrastructure for all FUSE operations
 
-#### FUSE Operations (23/40+)
+#### FUSE Operations (24/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -54,6 +54,8 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `link` - Create hard links (basic functionality, no EXDEV handling)
 - [x] `access` - Check file permissions
 - [x] `mknod` - Create special files (FIFOs, devices, sockets)
+- [x] `opendir` - Open directory handle
+- [x] `releasedir` - Release directory handle
 
 #### Policies (8/36)
 **Create Policies (5/16)**:
@@ -82,8 +84,6 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ### 🚧 In Progress / High Priority
 
 #### FUSE Operations
-- [ ] `opendir` - Open directory handle (MEDIUM)
-- [ ] `releasedir` - Release directory handle (MEDIUM)
 - [ ] `fsyncdir` - Sync directory (LOW)
 
 #### Policies
@@ -105,8 +105,8 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ### ❌ Not Implemented
 
-#### FUSE Operations (20+)
-- Directory handles: `opendir`, `releasedir`, `fsyncdir`
+#### FUSE Operations (18+)
+- Directory sync: `fsyncdir`
 - Advanced I/O: `poll`, `fallocate`, `ftruncate`, `copy_file_range`
 - Locking: `lock`, `flock`
 - Time operations: separate `utimens` operation
@@ -219,6 +219,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Manual permission bit checking without libc dependency
 - See `docs/ACCESS_OPERATION_DESIGN.md` for implementation details
 
+### Directory Handle Management
+- Implements proper opendir/releasedir operations with handle tracking
+- Directory handles maintain path context between operations
+- Compatible with clients that may not use opendir before readdir
+- Thread-safe handle storage using parking_lot RwLock
+- See `docs/OPENDIR_RELEASEDIR_DESIGN.md` for implementation details
+
 ## Resources
 
 - **Documentation**: See `docs/` directory for detailed design docs
@@ -228,13 +235,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Add directory handle support (opendir/releasedir)
-2. Implement lus (least used space) create policy
-3. Add moveonenospc feature for automatic file migration
-4. Implement path preservation for remaining "existing path" policies
-5. Add fallocate support for preallocation
+1. Implement lus (least used space) create policy
+2. Add moveonenospc feature for automatic file migration
+3. Implement path preservation for remaining "existing path" policies
+4. Add fallocate support for preallocation
+5. Implement fsyncdir for directory synchronization
 
 ---
 
 *Last Updated: January 2025*
-*Total Progress: ~33% of full mergerfs functionality*
+*Total Progress: ~35% of full mergerfs functionality*

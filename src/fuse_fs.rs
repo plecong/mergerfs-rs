@@ -32,6 +32,12 @@ use tracing::{debug, error, info, warn};
 const TTL: Duration = Duration::from_secs(1);
 const CONTROL_FILE_INO: u64 = u64::MAX; // Special inode for /.mergerfs
 
+#[derive(Debug)]
+pub struct DirHandle {
+    pub path: PathBuf,
+    pub ino: u64,
+}
+
 pub struct MergerFS {
     pub file_manager: Arc<FileManager>,
     pub metadata_manager: Arc<MetadataManager>,
@@ -42,6 +48,8 @@ pub struct MergerFS {
     pub rename_manager: Arc<RenameManager>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
+    dir_handles: parking_lot::RwLock<HashMap<u64, DirHandle>>,
+    next_dir_handle: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +123,8 @@ impl MergerFS {
             rename_manager: Arc::new(rename_manager),
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
+            dir_handles: parking_lot::RwLock::new(HashMap::new()),
+            next_dir_handle: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -180,6 +190,27 @@ impl MergerFS {
             flags: 0,
             blksize: 512,
         })
+    }
+
+    pub fn allocate_dir_handle(&self) -> u64 {
+        self.next_dir_handle.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn get_dir_handle(&self, fh: u64) -> Option<DirHandle> {
+        self.dir_handles.read().get(&fh).cloned()
+    }
+
+    pub fn remove_dir_handle(&self, fh: u64) {
+        self.dir_handles.write().remove(&fh);
+    }
+}
+
+impl Clone for DirHandle {
+    fn clone(&self) -> Self {
+        DirHandle {
+            path: self.path.clone(),
+            ino: self.ino,
+        }
     }
 }
 
@@ -434,13 +465,44 @@ impl Filesystem for MergerFS {
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let _span = tracing::debug_span!("fuse::readdir", ino, offset).entered();
+        let _span = tracing::debug_span!("fuse::readdir", ino, fh, offset).entered();
         tracing::debug!("Starting readdir");
 
+        // Try to use directory handle if provided
+        let _dir_path = if fh != 0 {
+            match self.get_dir_handle(fh) {
+                Some(handle) => {
+                    tracing::debug!("Using directory handle for path: {:?}", handle.path);
+                    handle.path.to_string_lossy().to_string()
+                }
+                None => {
+                    // Handle not found, fall back to inode lookup
+                    tracing::debug!("Directory handle not found, using inode lookup");
+                    match self.get_inode_data(ino) {
+                        Some(data) => data.path,
+                        None => {
+                            reply.error(ENOENT);
+                            return;
+                        }
+                    }
+                }
+            }
+        } else {
+            // No handle provided, use inode lookup
+            match self.get_inode_data(ino) {
+                Some(data) => data.path,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Verify it's a directory
         let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
@@ -1851,35 +1913,54 @@ impl Filesystem for MergerFS {
         }
     }
 
-    fn opendir(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
-        info!("opendir: ino={}", ino);
+    fn opendir(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        let _span = tracing::info_span!("fuse::opendir", ino, flags).entered();
+        tracing::debug!("Opening directory");
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
+                tracing::error!("Directory not found");
                 reply.error(ENOENT);
                 return;
             }
         };
 
         if inode_data.attr.kind != FileType::Directory {
+            tracing::error!("Not a directory");
             reply.error(ENOTDIR);
             return;
         }
 
-        // For now, we don't track directory handles
-        reply.opened(0, 0);
+        // Create directory handle
+        let handle = DirHandle {
+            path: PathBuf::from(&inode_data.path),
+            ino,
+        };
+
+        // Allocate handle ID and store it
+        let fh = self.allocate_dir_handle();
+        self.dir_handles.write().insert(fh, handle);
+
+        tracing::info!("Directory opened with handle: {}", fh);
+        reply.opened(fh, flags as u32);
     }
 
     fn releasedir(
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         _flags: i32,
         reply: fuser::ReplyEmpty,
     ) {
-        info!("releasedir: ino={}", ino);
+        let _span = tracing::info_span!("fuse::releasedir", ino, fh).entered();
+        tracing::debug!("Releasing directory handle");
+
+        // Remove the directory handle
+        self.remove_dir_handle(fh);
+
+        tracing::info!("Directory handle released: {}", fh);
         reply.ok();
     }
 
@@ -2071,5 +2152,61 @@ mod tests {
         // Test that non-existing file returns None
         let missing_attr = fs.create_file_attr(std::path::Path::new("missing.txt"));
         assert!(missing_attr.is_none());
+    }
+
+    #[test]
+    fn test_directory_handle_allocation() {
+        let (_temp_dirs, fs) = setup_test_fs();
+        
+        // Test allocating directory handles
+        let fh1 = fs.allocate_dir_handle();
+        let fh2 = fs.allocate_dir_handle();
+        let fh3 = fs.allocate_dir_handle();
+        
+        assert_eq!(fh1, 1);
+        assert_eq!(fh2, 2);
+        assert_eq!(fh3, 3);
+    }
+
+    #[test]
+    fn test_directory_handle_operations() {
+        let (_temp_dirs, fs) = setup_test_fs();
+        
+        // Create a directory handle
+        let handle = DirHandle {
+            path: PathBuf::from("/test/dir"),
+            ino: 42,
+        };
+        
+        // Store the handle
+        let fh = fs.allocate_dir_handle();
+        fs.dir_handles.write().insert(fh, handle.clone());
+        
+        // Retrieve the handle
+        let retrieved = fs.get_dir_handle(fh);
+        assert!(retrieved.is_some());
+        
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.path, PathBuf::from("/test/dir"));
+        assert_eq!(retrieved.ino, 42);
+        
+        // Remove the handle
+        fs.remove_dir_handle(fh);
+        
+        // Verify it's gone
+        let removed = fs.get_dir_handle(fh);
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_dir_handle_clone() {
+        let handle = DirHandle {
+            path: PathBuf::from("/some/path"),
+            ino: 123,
+        };
+        
+        let cloned = handle.clone();
+        assert_eq!(cloned.path, handle.path);
+        assert_eq!(cloned.ino, handle.ino);
     }
 }
