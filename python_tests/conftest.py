@@ -60,6 +60,50 @@ def tmpfs_branches() -> Generator[List[Path], None, None]:
 
 
 @pytest.fixture
+def mounted_fs_with_policy(fuse_manager: FuseManager, request):
+    """Mount filesystem with a specific policy on tmpfs branches.
+    
+    Usage:
+        @pytest.mark.parametrize('mounted_fs_with_policy', ['lus'], indirect=True)
+        def test_something(mounted_fs_with_policy):
+            process, mountpoint, branches = mounted_fs_with_policy
+    """
+    # Get policy from parametrize
+    policy = request.param if hasattr(request, 'param') else 'ff'
+    
+    # Get tmpfs manager and validate
+    tmpfs_mgr = get_tmpfs_manager()
+    is_valid, errors = tmpfs_mgr.validate_setup()
+    if not is_valid:
+        pytest.skip(f"Tmpfs mounts not available: {'; '.join(errors)}")
+    
+    # Clear all mounts first
+    tmpfs_mgr.clear_all()
+    
+    # Use standard tmpfs mounts directly
+    branches = [
+        Path("/tmp/mergerfs_test_100mb"),
+        Path("/tmp/mergerfs_test_200mb"),
+        Path("/tmp/mergerfs_test_500mb")
+    ]
+    
+    # Create mountpoint
+    mountpoint = fuse_manager.create_temp_mountpoint()
+    
+    # Create config with specified policy
+    config = FuseConfig(
+        policy=policy,
+        branches=branches,
+        mountpoint=mountpoint,
+        enable_trace=os.getenv('FUSE_TRACE', '').lower() in ('1', 'true', 'yes')
+    )
+    
+    # Mount and yield
+    with fuse_manager.mounted_fs(config) as result:
+        yield result
+
+
+@pytest.fixture
 def temp_mountpoint(fuse_manager: FuseManager) -> Path:
     """Create a temporary mountpoint."""
     return fuse_manager.create_temp_mountpoint()

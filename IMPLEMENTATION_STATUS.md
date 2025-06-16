@@ -14,9 +14,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Overall Progress
 
 - **FUSE Operations**: 24 of 40+ implemented (60%)
-- **Policies**: 9 of 36 implemented (25%)
+- **Policies**: 10 of 36 implemented (28%)
 - **Special Features**: 5 of 10+ implemented (50%)
-- **Test Coverage**: 175 tests passing (164 Rust + 11 Python)
+- **Test Coverage**: 181 tests passing (170 Rust + 11 Python)
 
 ## Implementation Status by Component
 
@@ -57,11 +57,12 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `opendir` - Open directory handle
 - [x] `releasedir` - Release directory handle
 
-#### Policies (8/36)
-**Create Policies (5/16)**:
+#### Policies (9/36)
+**Create Policies (6/16)**:
 - [x] `ff` (FirstFound) - First writable branch
 - [x] `mfs` (MostFreeSpace) - Branch with most free space
 - [x] `lfs` (LeastFreeSpace) - Branch with least free space
+- [x] `lus` (LeastUsedSpace) - Branch with least used space
 - [x] `rand` (Random) - Random branch selection
 - [x] `epmfs` (ExistingPathMostFreeSpace) - Existing path with most free space
 
@@ -87,10 +88,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 #### FUSE Operations
 - [ ] `fsyncdir` - Sync directory (LOW)
 
-#### Policies (9/36)
-**Create Policies (6/16)**:
+#### Policies (10/36)
+**Create Policies (7/16)**:
 - [x] `pfrd` (ProportionalFillRandomDistribution) - Random weighted by free space
-- [ ] `lus` - Least used space (MEDIUM)
+- [x] `lus` (LeastUsedSpace) - Branch with least used space
 - [ ] `eplfs` - Existing path, least free space (MEDIUM)
 
 
@@ -243,7 +244,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Implement lus (least used space) create policy
+1. Implement eplfs (existing path, least free space) create policy
 2. Implement path preservation for remaining "existing path" policies
 3. Add fallocate support for preallocation
 4. Implement fsyncdir for directory synchronization
@@ -252,4 +253,4 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ---
 
 *Last Updated: January 2025*
-*Total Progress: ~40% of full mergerfs functionality*
+*Total Progress: ~42% of full mergerfs functionality*

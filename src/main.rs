@@ -40,7 +40,8 @@ use policy::{
     create::{
         FirstFoundCreatePolicy, 
         MostFreeSpaceCreatePolicy, 
-        LeastFreeSpaceCreatePolicy, 
+        LeastFreeSpaceCreatePolicy,
+        LeastUsedSpaceCreatePolicy, 
         RandomCreatePolicy, 
         ExistingPathMostFreeSpaceCreatePolicy
     }
@@ -110,12 +111,13 @@ fn main() {
         println!("  {} /tmp/merged /tmp/branch1 /tmp/branch2", args[0]);
         println!("  {} -o func.create=mfs /tmp/merged /tmp/branch1 /tmp/branch2", args[0]);
         println!("  {} -o func.create=lfs /tmp/merged /tmp/branch1 /tmp/branch2", args[0]);
+        println!("  {} -o func.create=lus /tmp/merged /tmp/branch1 /tmp/branch2", args[0]);
         println!("");
         println!("This will mount a union filesystem at /tmp/merged that combines");
         println!("the contents of /tmp/branch1 and /tmp/branch2");
         println!("");
         println!("Features implemented:");
-        println!("  - File creation/deletion with configurable policies (ff, mfs, lfs)");
+        println!("  - File creation/deletion with configurable policies (ff, mfs, lfs, lus)");
         println!("  - Directory creation/removal with policy support");
         println!("  - File and directory reading from any branch");
         println!("  - Union directory listings (merged view)");
@@ -150,6 +152,7 @@ fn main() {
     let (_policy_name, policy): (&str, Box<dyn CreatePolicy>) = match create_policy.as_str() {
         "mfs" => ("MostFreeSpace", Box::new(MostFreeSpaceCreatePolicy::new())),
         "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy::new())),
+        "lus" => ("LeastUsedSpace", Box::new(LeastUsedSpaceCreatePolicy::new())),
         "rand" => ("Random", Box::new(RandomCreatePolicy::new())),
         "epmfs" => ("ExistingPathMostFreeSpace", Box::new(ExistingPathMostFreeSpaceCreatePolicy::new())),
         _ => ("FirstFound", Box::new(FirstFoundCreatePolicy::new())),
