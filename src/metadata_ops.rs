@@ -3,6 +3,7 @@ use crate::policy::{ActionPolicy, PolicyError};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tracing;
 
 pub struct MetadataManager {
     branches: Vec<Arc<Branch>>,
@@ -19,16 +20,24 @@ impl MetadataManager {
 
     /// Change file permissions on all applicable branches
     pub fn chmod(&self, path: &Path, mode: u32) -> Result<(), PolicyError> {
+        let _span = tracing::debug_span!("metadata::chmod", path = ?path, mode = mode).entered();
+        
         let target_branches = self.action_policy.select_branches(&self.branches, path)?;
+        tracing::debug!("Selected {} branches for chmod", target_branches.len());
+        
         let mut last_error = None;
         let mut success_count = 0;
 
         for branch in target_branches {
             let full_path = branch.full_path(path);
             if full_path.exists() {
+                tracing::debug!("Applying chmod to {:?}", full_path);
                 match self.chmod_single(&full_path, mode) {
                     Ok(_) => success_count += 1,
-                    Err(e) => last_error = Some(e),
+                    Err(e) => {
+                        tracing::warn!("chmod failed on {:?}: {:?}", full_path, e);
+                        last_error = Some(e)
+                    },
                 }
             }
         }

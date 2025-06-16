@@ -17,6 +17,19 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from contextlib import contextmanager
 import psutil
+try:
+    from .timing_utils import wait_for_operation, FuseLogCapture
+except ImportError:
+    # Fallback if timing_utils is not available
+    FuseLogCapture = None
+    def wait_for_operation(check_fn, timeout=5.0, interval=0.1, operation_name="operation"):
+        import time
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if check_fn():
+                return True, time.time() - start_time
+            time.sleep(interval)
+        return False, time.time() - start_time
 
 
 @dataclass
@@ -126,25 +139,50 @@ class FuseManager:
         
         print(f"Mounting FUSE: {' '.join(cmd)}")
         
+        # Set environment for debug logging if requested
+        env = os.environ.copy()
+        if os.getenv('FUSE_DEBUG'):
+            env['RUST_LOG'] = 'debug'
+        elif os.getenv('RUST_LOG'):
+            env['RUST_LOG'] = os.getenv('RUST_LOG')
+        else:
+            env['RUST_LOG'] = 'info'
+            
         # Start the process
         try:
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                env=env
             )
             
+            # Start log capture if debug is enabled
+            log_capture = None
+            if FuseLogCapture and env.get('RUST_LOG') in ['debug', 'trace']:
+                log_capture = FuseLogCapture(process)
+                log_capture.start_capture()
+            
             # Give the process a moment to start
-            time.sleep(0.5)
+            time.sleep(0.1)  # Reduced from 0.5
             
             # Check if process is still running
             if process.poll() is not None:
                 stdout, stderr = process.communicate()
                 raise RuntimeError(f"FUSE process exited immediately with code {process.returncode}\nstdout: {stdout}\nstderr: {stderr}")
             
-            # Wait for mount to be ready
+            # Wait for mount to be ready with better diagnostics
+            mount_start = time.time()
             self._wait_for_mount(config.mountpoint, config.timeout)
+            mount_time = time.time() - mount_start
+            
+            if mount_time > 0.5:
+                print(f"Mount took {mount_time:.2f}s to become ready")
+                
+            # Store log capture with the process
+            if log_capture:
+                process._log_capture = log_capture
             
             # Store the mount
             self.active_mounts[config.mountpoint] = process
@@ -164,17 +202,25 @@ class FuseManager:
         Raises:
             TimeoutError: If mount doesn't become ready in time
         """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
+        def check_mount():
             try:
                 # Try to stat the mountpoint - this will work when FUSE is ready
                 os.stat(mountpoint)
-                return
-            except OSError:
-                time.sleep(0.1)
-                continue
+                # Also try to list directory to ensure it's fully mounted
+                list(mountpoint.iterdir())
+                return True
+            except (OSError, PermissionError):
+                return False
                 
-        raise TimeoutError(f"FUSE mount at {mountpoint} did not become ready within {timeout}s")
+        success, elapsed = wait_for_operation(
+            check_mount,
+            timeout=timeout,
+            interval=0.05,  # Reduced from 0.1 for faster response
+            operation_name=f"mount at {mountpoint}"
+        )
+        
+        if not success:
+            raise TimeoutError(f"FUSE mount at {mountpoint} did not become ready within {timeout}s")
     
     def unmount(self, mountpoint: Path) -> bool:
         """Unmount a FUSE filesystem.
@@ -206,7 +252,23 @@ class FuseManager:
             del self.active_mounts[mountpoint]
             
             # Wait for the mountpoint to be unmounted
+            unmount_start = time.time()
             self._wait_for_unmount(mountpoint, timeout=5.0)
+            unmount_time = time.time() - unmount_start
+            
+            if unmount_time > 0.5:
+                print(f"Unmount took {unmount_time:.2f}s to complete")
+                
+            # Stop log capture if present
+            if hasattr(process, '_log_capture'):
+                process._log_capture.stop_capture()
+                if os.getenv('FUSE_DEBUG_LOGS'):
+                    logs = process._log_capture.get_logs()
+                    if logs:
+                        print("\n=== FUSE Debug Logs ===")
+                        for line in logs[-50:]:  # Last 50 lines
+                            print(line)
+                        print("======================\n")
             
             return True
             
@@ -221,17 +283,22 @@ class FuseManager:
             mountpoint: Path to the mountpoint
             timeout: Timeout in seconds
         """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
+        def check_unmounted():
             try:
                 # Check if mountpoint is still mounted by trying to list it
                 # An unmounted FUSE mountpoint will typically be empty
-                if not list(mountpoint.iterdir()):
-                    return
+                items = list(mountpoint.iterdir())
+                return len(items) == 0
             except (OSError, PermissionError):
                 # This is expected when unmounting
-                return
-            time.sleep(0.1)
+                return True
+                
+        success, elapsed = wait_for_operation(
+            check_unmounted,
+            timeout=timeout,
+            interval=0.05,
+            operation_name=f"unmount at {mountpoint}"
+        )
     
     def cleanup(self):
         """Clean up all active mounts and temporary directories."""

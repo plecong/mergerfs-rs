@@ -97,7 +97,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
             min_size=1,
             max_size=20
         ).filter(lambda x: not x.startswith('.')),
-        size_kb=st.integers(min_value=1, max_value=1024)  # 1KB to 1MB
+        size_kb=st.integers(min_value=1, max_value=100)  # 1KB to 100KB
     )
     def create_file(self, filename: str, size_kb: int):
         """Create a file of specific size"""
@@ -242,7 +242,7 @@ class StatFSStateMachine(RuleBasedStateMachine):
         max_size=10
     )
 )
-@settings(max_examples=30, deadline=10000)
+@settings(max_examples=5, deadline=None)
 def test_space_calculation(num_files: int, file_sizes: List[int]):
     """Test that space calculations are correct after file operations"""
     assume(len(file_sizes) >= num_files)

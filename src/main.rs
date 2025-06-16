@@ -12,6 +12,7 @@ mod integration_tests;
 mod fuse_integration_tests;
 mod directory_ops_tests;
 mod rename_ops;
+mod permissions;
 
 #[cfg(test)]
 mod test_utils;
@@ -33,7 +34,16 @@ use std::sync::Arc;
 use branch::{Branch, BranchMode};
 use file_ops::FileManager;
 use fuse_fs::MergerFS;
-use policy::{FirstFoundCreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy, RandomCreatePolicy, CreatePolicy};
+use policy::{
+    CreatePolicy,
+    create::{
+        FirstFoundCreatePolicy, 
+        MostFreeSpaceCreatePolicy, 
+        LeastFreeSpaceCreatePolicy, 
+        RandomCreatePolicy, 
+        ExistingPathMostFreeSpaceCreatePolicy
+    }
+};
 
 fn parse_args(args: &[String]) -> (String, PathBuf, Vec<PathBuf>) {
     let mut create_policy = "ff".to_string();
@@ -65,6 +75,20 @@ fn parse_args(args: &[String]) -> (String, PathBuf, Vec<PathBuf>) {
 }
 
 fn main() {
+    // Initialize tracing with environment filter
+    use tracing_subscriber::{fmt, EnvFilter};
+    
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+        
+    fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_line_number(true)
+        .with_file(true)
+        .init();
+    
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 3 {
@@ -73,12 +97,13 @@ fn main() {
         println!("Usage: {} [options] <mountpoint> <branch1> [branch2] [branch3] ...", args[0]);
         println!("");
         println!("Options:");
-        println!("  -o func.create=POLICY    Create policy (ff|mfs|lfs) [default: ff]");
+        println!("  -o func.create=POLICY    Create policy (ff|mfs|lfs|epmfs) [default: ff]");
         println!("");
         println!("Create Policies:");
-        println!("  ff   - FirstFound: Create files in first writable branch");
-        println!("  mfs  - MostFreeSpace: Create files in branch with most free space");
-        println!("  lfs  - LeastFreeSpace: Create files in branch with least free space");
+        println!("  ff    - FirstFound: Create files in first writable branch");
+        println!("  mfs   - MostFreeSpace: Create files in branch with most free space");
+        println!("  lfs   - LeastFreeSpace: Create files in branch with least free space");
+        println!("  epmfs - ExistingPathMostFreeSpace: Create files where parent exists, with most free space");
         println!("");
         println!("Example:");
         println!("  {} /tmp/merged /tmp/branch1 /tmp/branch2", args[0]);
@@ -125,11 +150,20 @@ fn main() {
         "mfs" => ("MostFreeSpace", Box::new(MostFreeSpaceCreatePolicy::new())),
         "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy::new())),
         "rand" => ("Random", Box::new(RandomCreatePolicy::new())),
+        "epmfs" => ("ExistingPathMostFreeSpace", Box::new(ExistingPathMostFreeSpaceCreatePolicy::new())),
         _ => ("FirstFound", Box::new(FirstFoundCreatePolicy::new())),
     };
     
     let file_manager = FileManager::new(branches, policy);
     let fs = MergerFS::new(file_manager);
+    
+    // Log mount information
+    tracing::info!(
+        mountpoint = %mountpoint.display(),
+        branches = ?branch_paths,
+        policy = %create_policy,
+        "Starting mergerfs-rs mount"
+    );
     
     // Mount the filesystem
     let options = vec![
@@ -140,9 +174,10 @@ fn main() {
     
     match fuser::mount2(fs, &mountpoint, &options) {
         Ok(()) => {
-            // Filesystem unmounted successfully
+            tracing::info!("Filesystem unmounted successfully");
         }
         Err(e) => {
+            tracing::error!(error = %e, "Mount failed");
             eprintln!("Mount failed: {}", e);
             std::process::exit(1);
         }

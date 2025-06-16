@@ -45,7 +45,7 @@ class TestConcurrentFileOperations:
                 try:
                     file_path.write_text(content)
                     created_files.append(filename)
-                    time.sleep(0.01)  # Small delay to increase chance of race conditions
+                    # No artificial delay needed - let timing analysis show actual performance
                 except Exception as e:
                     print(f"Worker {worker_id} failed to create {filename}: {e}")
                     
@@ -109,7 +109,6 @@ class TestConcurrentFileOperations:
                     content = f"Write iteration {i} at {time.time()}"
                     file_path.write_text(content)
                     writes_completed += 1
-                    time.sleep(0.01)
                 except Exception as e:
                     print(f"Write failed for {filename} iteration {i}: {e}")
                     
@@ -125,7 +124,6 @@ class TestConcurrentFileOperations:
                     if file_path.exists():
                         content = file_path.read_text()
                         reads_completed += 1
-                    time.sleep(0.01)
                 except Exception as e:
                     print(f"Read failed for {filename} iteration {i}: {e}")
                     
@@ -375,9 +373,7 @@ class TestStressConditions:
                             dir_path.mkdir()
                             stats['directories_created'] += 1
                     
-                    # Random small delay
-                    if random.random() < 0.1:
-                        time.sleep(0.001)
+                    # No artificial delays - measure actual performance
                         
                 except Exception as e:
                     stats['errors'] += 1

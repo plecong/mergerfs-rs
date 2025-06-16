@@ -24,6 +24,9 @@ impl CreatePolicy for MostFreeSpaceCreatePolicy {
         branches: &[Arc<Branch>],
         _path: &Path,
     ) -> Result<Arc<Branch>, PolicyError> {
+        let _span = tracing::debug_span!("mfs::select_branch", path = ?_path).entered();
+        tracing::debug!("Evaluating {} branches", branches.len());
+        
         if branches.is_empty() {
             return Err(PolicyError::NoBranchesAvailable);
         }

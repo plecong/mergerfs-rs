@@ -13,10 +13,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 21 of 40+ implemented (52%)
-- **Policies**: 7 of 36 implemented (19%)
+- **FUSE Operations**: 22 of 40+ implemented (55%)
+- **Policies**: 8 of 36 implemented (22%)
 - **Special Features**: 3 of 10+ implemented (30%)
-- **Test Coverage**: 142 tests passing (132 Rust + 10 Python)
+- **Test Coverage**: 153 tests passing (147 Rust + 6 Python)
 
 ## Implementation Status by Component
 
@@ -28,8 +28,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Inode management and path resolution
 - [x] Error handling with proper errno mapping
 - [x] Alpine Linux/MUSL compatibility (no libc dependency)
+- [x] Permission checking utilities for access control
 
-#### FUSE Operations (21/40+)
+#### FUSE Operations (22/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -50,13 +51,15 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `symlink` - Create symbolic links (with path cloning)
 - [x] `readlink` - Read symbolic links
 - [x] `link` - Create hard links (basic functionality, no EXDEV handling)
+- [x] `access` - Check file permissions
 
-#### Policies (7/36)
-**Create Policies (4/16)**:
+#### Policies (8/36)
+**Create Policies (5/16)**:
 - [x] `ff` (FirstFound) - First writable branch
 - [x] `mfs` (MostFreeSpace) - Branch with most free space
 - [x] `lfs` (LeastFreeSpace) - Branch with least free space
 - [x] `rand` (Random) - Random branch selection
+- [x] `epmfs` (ExistingPathMostFreeSpace) - Existing path with most free space
 
 **Action Policies (3/4)**:
 - [x] `all` - Apply to all branches
@@ -77,18 +80,16 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ### 🚧 In Progress / High Priority
 
 #### FUSE Operations
-- [x] `symlink` - Create symbolic links (COMPLETE)
-- [x] `readlink` - Read symbolic links (COMPLETE)
-- [x] `link` - Create hard links (COMPLETE - basic functionality)
-- [x] `ioctl` - Runtime configuration via xattr on control file (COMPLETE)
-- [ ] `access` - Check permissions (MEDIUM)
 - [ ] `mknod` - Create special files (MEDIUM)
+- [ ] `opendir` - Open directory handle (MEDIUM)
+- [ ] `releasedir` - Release directory handle (MEDIUM)
+- [ ] `fsyncdir` - Sync directory (LOW)
 
 #### Policies
 **Create Policies**:
-- [ ] `epmfs` - Existing path, most free space (HIGH)
 - [ ] `lus` - Least used space (MEDIUM)
 - [ ] `pfrd` - Percentage free random distribution (MEDIUM)
+- [ ] `eplfs` - Existing path, least free space (MEDIUM)
 
 
 **Action Policies**:
@@ -126,9 +127,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Implementation Priorities
 
 ### Phase 1: Core Compatibility (Current Focus)
-1. **Essential FUSE operations**: symlink, link operations
-2. **Search policy `all`**: Required for many use cases
-3. **Create policy `epmfs`**: Common balanced distribution policy
+1. ✅ **Essential FUSE operations**: symlink, link operations (COMPLETED)
+2. ✅ **Search policy `all`**: Required for many use cases (COMPLETED)
+3. ✅ **Create policy `epmfs`**: Common balanced distribution policy (COMPLETED)
 
 ### Phase 2: Enhanced Functionality
 1. **moveonenospc**: Automatic file migration on ENOSPC
@@ -147,7 +148,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Testing Status
 
 ### Test Coverage
-- **Unit Tests**: 132 Rust tests covering core functionality
+- **Unit Tests**: 137 Rust tests covering core functionality
 - **Integration Tests**: Python tests with property-based testing
 - **FUSE Tests**: Real filesystem mount testing with comprehensive scenarios
 
@@ -160,6 +161,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Extended attributes (xattr)
 - ✅ Symbolic links (creation and reading)
 - ✅ Hard links (basic functionality)
+- ✅ Access permission checking
 - ❌ Special files
 - ✅ Runtime configuration (via xattr)
 
@@ -200,6 +202,12 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Properly detects and reports symlinks as `FileType::Symlink` in FUSE operations
 - Matches C++ implementation's default behavior (follow_symlinks=NEVER)
 
+### Access Operation
+- Implements POSIX-compliant permission checking
+- Supports F_OK, R_OK, W_OK, X_OK access modes
+- Manual permission bit checking without libc dependency
+- See `docs/ACCESS_OPERATION_DESIGN.md` for implementation details
+
 ## Resources
 
 - **Documentation**: See `docs/` directory for detailed design docs
@@ -209,13 +217,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Implement rename operation with proper policy support
-2. Add symbolic link support (symlink/readlink)
-3. Implement ioctl for runtime configuration
-4. Add search policy "all" for union behavior
-5. Update Python tests for new functionality
+1. Implement mknod operation for special files
+2. Add directory handle support (opendir/releasedir)
+3. Implement lus (least used space) create policy
+4. Add moveonenospc feature for automatic file migration
+5. Implement path preservation for remaining "existing path" policies
 
 ---
 
-*Last Updated: Current Session*
-*Total Progress: ~30% of full mergerfs functionality*
+*Last Updated: January 2025*
+*Total Progress: ~33% of full mergerfs functionality*

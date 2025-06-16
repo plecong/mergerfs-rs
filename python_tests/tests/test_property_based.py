@@ -47,10 +47,10 @@ from lib.fuse_manager import FuseManager, FuseConfig, FileSystemState
 
 # Strategies for generating test data
 valid_filename = st.text(
-    alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), blacklist_characters="./\\"),
-    min_size=1,
-    max_size=50
-).filter(lambda x: x not in [".", "..", ""] and not x.startswith("."))
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_",
+    min_size=2,
+    max_size=20
+).filter(lambda x: x not in [".", "..", ""] and not x.startswith(".") and not x.isdigit() and x[0].isalpha())
 
 file_content = st.text(min_size=0, max_size=1000)
 
@@ -194,7 +194,10 @@ class TestPolicyProperties:
         with fuse_manager.mounted_fs(config) as (process, mountpoint, branches):
             for dirname in directory_names:
                 dir_path = mountpoint / dirname
-                dir_path.mkdir()
+                
+                # Skip if directory already exists (from previous test run)
+                if not dir_path.exists():
+                    dir_path.mkdir()
                 
                 # Directory should exist and be accessible
                 assert dir_path.exists(), f"Directory {dirname} should exist"

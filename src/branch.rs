@@ -7,7 +7,7 @@ pub enum BranchMode {
     NoCreate,  // Branch can be read and modified but not used for new file creation
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Branch {
     pub path: PathBuf,
     pub mode: BranchMode,

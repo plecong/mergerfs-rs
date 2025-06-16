@@ -7,6 +7,7 @@ use crate::xattr::{XattrManager, XattrError, XattrFlags};
 use crate::policy::{FirstFoundSearchPolicy, FirstFoundCreatePolicy};
 use crate::config_manager::ConfigManager;
 use crate::rename_ops::RenameManager;
+use crate::permissions::{check_access, AccessError};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
     ReplyOpen, ReplyWrite, Request,
@@ -184,7 +185,9 @@ impl MergerFS {
 
 impl Filesystem for MergerFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        info!("lookup: parent={}, name={:?}", parent, name);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::lookup", parent, name = %name_str).entered();
+        tracing::debug!("Starting lookup");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -260,7 +263,8 @@ impl Filesystem for MergerFS {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        debug!("getattr: ino={}", ino);
+        let _span = tracing::debug_span!("fuse::getattr", ino).entered();
+        tracing::debug!("Starting getattr");
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
@@ -292,7 +296,8 @@ impl Filesystem for MergerFS {
     }
 
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        info!("open: ino={}, flags={}", ino, flags);
+        let _span = tracing::info_span!("fuse::open", ino, flags).entered();
+        tracing::debug!("Starting open");
 
         match self.get_inode_data(ino) {
             Some(data) => {
@@ -339,7 +344,8 @@ impl Filesystem for MergerFS {
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        debug!("read: ino={}, fh={}, offset={}, size={}", ino, fh, offset, size);
+        let _span = tracing::debug_span!("fuse::read", ino, fh, offset, size).entered();
+        tracing::debug!("Starting read");
 
         // Get the file handle
         let handle = match self.file_handle_manager.get_handle(fh) {
@@ -432,7 +438,8 @@ impl Filesystem for MergerFS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        debug!("readdir: ino={}, offset={}", ino, offset);
+        let _span = tracing::debug_span!("fuse::readdir", ino, offset).entered();
+        tracing::debug!("Starting readdir");
 
         let data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -513,7 +520,9 @@ impl Filesystem for MergerFS {
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        info!("create: parent={}, name={:?}", parent, name);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::create", parent, name = %name_str).entered();
+        tracing::debug!("Starting create");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -577,7 +586,8 @@ impl Filesystem for MergerFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        info!("write: ino={}, fh={}, offset={}, len={}", ino, fh, offset, data.len());
+        let _span = tracing::info_span!("fuse::write", ino, fh, offset, len = data.len()).entered();
+        tracing::debug!("Starting write");
 
         // Try to get file handle first
         let handle = self.file_handle_manager.get_handle(fh);
@@ -1395,8 +1405,8 @@ impl Filesystem for MergerFS {
         reply.ok();
     }
 
-    fn access(&mut self, _req: &Request, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
-        info!("access: ino={}, mask={}", ino, mask);
+    fn access(&mut self, req: &Request, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
+        info!("access: ino={}, mask={}, uid={}, gid={}", ino, mask, req.uid(), req.gid());
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -1406,15 +1416,49 @@ impl Filesystem for MergerFS {
             }
         };
 
-        // Check if file exists in any branch using search policy
         let path = Path::new(&inode_data.path);
         
-        if self.file_manager.file_exists_search(path) {
-            // For now, we allow all access if the file exists
-            // A proper implementation would check actual permissions
-            reply.ok();
-        } else {
-            reply.error(ENOENT);
+        // Find the first branch containing the file
+        let branch = match self.file_manager.find_first_branch(path) {
+            Ok(branch) => branch,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        
+        // Construct full path
+        let full_path = branch.full_path(path);
+        debug!("access: checking full path {:?}", full_path);
+        
+        // Get file metadata (follow symlinks for access check)
+        let metadata = match std::fs::metadata(&full_path) {
+            Ok(m) => m,
+            Err(e) => {
+                let errno = match e.kind() {
+                    std::io::ErrorKind::NotFound => ENOENT,
+                    std::io::ErrorKind::PermissionDenied => EACCES,
+                    _ => EIO,
+                };
+                debug!("access: metadata error {:?}, errno={}", e, errno);
+                reply.error(errno);
+                return;
+            }
+        };
+        
+        use std::os::unix::fs::MetadataExt;
+        debug!("access: file mode={:o}, uid={}, gid={}", metadata.mode(), metadata.uid(), metadata.gid());
+        
+        // Check access permissions
+        match check_access(req.uid(), req.gid(), &metadata, mask) {
+            Ok(()) => {
+                debug!("access: permission granted");
+                reply.ok();
+            }
+            Err(AccessError(errno)) => {
+                debug!("access: permission denied, errno={}", errno);
+                reply.error(errno);
+            }
         }
     }
 

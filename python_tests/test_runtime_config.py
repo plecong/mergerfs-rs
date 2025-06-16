@@ -114,7 +114,7 @@ class TestRuntimeConfig:
         control_file = mountpoint / ".mergerfs"
         
         # Test valid policies
-        valid_policies = [b'ff', b'mfs', b'lfs', b'rand']
+        valid_policies = [b'ff', b'mfs', b'lfs', b'rand', b'epmfs']
         
         for policy in valid_policies:
             xattr.setxattr(str(control_file), b'user.mergerfs.func.create', policy)

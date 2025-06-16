@@ -190,3 +190,7 @@ uv run python run_tests.py --test-type all
 3. **Use Path objects** - The fixtures return pathlib.Path objects, not strings
 4. **Check file existence** - Ensure control files like `.mergerfs` are actually created
 5. **Update pyproject.toml** - Add new dependencies to pyproject.toml, then run `uv sync`
+
+## External Documentation References
+
+- Documentation for original implementation is at https://trapexit.github.io/mergerfs/latest/

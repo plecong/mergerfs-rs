@@ -178,21 +178,21 @@ impl ConfigOption for CreatePolicyOption {
     fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
         // Validate policy name
         match value {
-            "ff" | "mfs" | "lfs" | "rand" => {
+            "ff" | "mfs" | "lfs" | "rand" | "epmfs" => {
                 *self.current_value.write() = value.to_string();
                 // TODO: Actually update the policy in file_manager
                 // This will require modifying FileManager to support runtime policy changes
                 Ok(())
             }
             _ => Err(ConfigError::InvalidValue(format!(
-                "Unknown create policy: {}. Valid options: ff, mfs, lfs, rand",
+                "Unknown create policy: {}. Valid options: ff, mfs, lfs, rand, epmfs",
                 value
             ))),
         }
     }
     
     fn help(&self) -> &str {
-        "Create policy: ff (first found), mfs (most free space), lfs (least free space), rand (random)"
+        "Create policy: ff (first found), mfs (most free space), lfs (least free space), rand (random), epmfs (existing path most free space)"
     }
 }
 
@@ -356,6 +356,7 @@ mod tests {
         assert!(manager.set_option("func.create", "mfs").is_ok());
         assert!(manager.set_option("func.create", "lfs").is_ok());
         assert!(manager.set_option("func.create", "rand").is_ok());
+        assert!(manager.set_option("func.create", "epmfs").is_ok());
         
         // Test invalid policy
         assert!(manager.set_option("func.create", "invalid").is_err());

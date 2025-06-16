@@ -35,7 +35,7 @@ class TestRandomPolicyUnit:
             
             # Start mergerfs-rs with random policy
             cmd = [
-                str(Path.cwd().parent / "target" / "debug" / "mergerfs-rs"),
+                str(Path.cwd().parent / "target" / "release" / "mergerfs-rs"),
                 "-o", "func.create=rand",
                 str(mountpoint)
             ] + [str(b) for b in branches]
@@ -102,7 +102,7 @@ class TestRandomPolicyUnit:
             
             # Start mergerfs-rs with random policy
             cmd = [
-                str(Path.cwd().parent / "target" / "debug" / "mergerfs-rs"),
+                str(Path.cwd().parent / "target" / "release" / "mergerfs-rs"),
                 "-o", "func.create=rand",
                 str(mountpoint)
             ] + [str(b) for b in branches]

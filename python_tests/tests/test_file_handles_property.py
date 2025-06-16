@@ -101,7 +101,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         """Create some initial files for testing"""
         for i in range(3):
             path = self.mountpoint / f"initial_{i}.txt"
-            path.write_text(f"Initial content {i}")
+            path.write_bytes(f"Initial content {i}".encode('utf-8'))
             # Note: FileSystemState doesn't have add_file method
             if not hasattr(self.state, 'files'):
                 self.state.files = {}
@@ -120,7 +120,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         path = self.mountpoint / filename
         
         try:
-            path.write_text(content)
+            path.write_bytes(content.encode('utf-8'))
             if not hasattr(self.state, 'files'):
                 self.state.files = {}
             self.state.files[f"/{filename}"] = content
@@ -227,13 +227,13 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         try:
             if handle.mode in ['w', 'w+']:
                 # Write mode truncates
-                path.write_text(content)
+                path.write_bytes(content.encode('utf-8'))
                 self.state.files[handle.path] = content
             elif handle.mode in ['a', 'a+']:
                 # Append mode
                 current = self.state.files.get(handle.path, "")
                 new_content = current + content
-                path.write_text(new_content)
+                path.write_bytes(new_content.encode('utf-8'))
                 self.state.files[handle.path] = new_content
             
             note(f"Wrote {len(content)} bytes through handle {handle_id}")
@@ -298,7 +298,7 @@ class FileHandleStateMachine(RuleBasedStateMachine):
         for path, content in self.state.files.items():
             mount_path = self.mountpoint / path.lstrip('/')
             if mount_path.exists():
-                actual = mount_path.read_text()
+                actual = mount_path.read_bytes().decode('utf-8')
                 # Only check if no handles are open for writing
                 if path not in self.open_files or all(
                     self.handles[hid].mode in ['r', 'r+'] 
@@ -326,19 +326,19 @@ def test_concurrent_read_handles(num_handles: int, content: str):
     try:
         process = manager.mount(config)
         
-        # Create test file
+        # Create test file - write in binary mode to preserve exact content
         test_file = mountpoint / "concurrent_test.txt"
-        test_file.write_text(content)
+        test_file.write_bytes(content.encode('utf-8'))
         
-        # Open multiple read handles
+        # Open multiple read handles in binary mode
         handles = []
         for i in range(num_handles):
-            fh = open(test_file, 'r')
+            fh = open(test_file, 'rb')
             handles.append(fh)
         
         # All handles should read the same content
         for i, fh in enumerate(handles):
-            read_content = fh.read()
+            read_content = fh.read().decode('utf-8')
             assert read_content == content, \
                 f"Handle {i} read different content: {read_content!r} != {content!r}"
             fh.seek(0)  # Reset for potential reuse
