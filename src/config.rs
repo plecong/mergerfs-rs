@@ -43,12 +43,28 @@ impl Default for RenameEXDEV {
 }
 
 #[derive(Debug, Clone)]
+pub struct MoveOnENOSPC {
+    pub enabled: bool,
+    pub policy_name: String,  // Store policy name, will be resolved at runtime
+}
+
+impl Default for MoveOnENOSPC {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            policy_name: "pfrd".to_string(),  // Default to pfrd (proportional fill random distribution)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub statfs_mode: StatFSMode,
     pub statfs_ignore: StatFSIgnore,
     pub mountpoint: PathBuf,
     pub ignore_path_preserving_on_rename: bool,
     pub rename_exdev: RenameEXDEV,
+    pub moveonenospc: MoveOnENOSPC,
 }
 
 impl Default for Config {
@@ -59,6 +75,7 @@ impl Default for Config {
             mountpoint: PathBuf::from("/mnt/mergerfs"),
             ignore_path_preserving_on_rename: false,
             rename_exdev: RenameEXDEV::default(),
+            moveonenospc: MoveOnENOSPC::default(),
         }
     }
 }

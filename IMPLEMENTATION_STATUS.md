@@ -14,9 +14,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Overall Progress
 
 - **FUSE Operations**: 24 of 40+ implemented (60%)
-- **Policies**: 8 of 36 implemented (22%)
-- **Special Features**: 3 of 10+ implemented (30%)
-- **Test Coverage**: 162 tests passing (154 Rust + 8 Python)
+- **Policies**: 9 of 36 implemented (25%)
+- **Special Features**: 5 of 10+ implemented (50%)
+- **Test Coverage**: 175 tests passing (164 Rust + 11 Python)
 
 ## Implementation Status by Component
 
@@ -80,16 +80,17 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Extended attributes (xattr) support with policy integration
 - [x] Configuration system (StatFS modes)
 - [x] Comprehensive Python integration tests with Hypothesis
+- [x] moveonenospc - Automatic file migration on ENOSPC/EDQUOT
 
 ### 🚧 In Progress / High Priority
 
 #### FUSE Operations
 - [ ] `fsyncdir` - Sync directory (LOW)
 
-#### Policies
-**Create Policies**:
+#### Policies (9/36)
+**Create Policies (6/16)**:
+- [x] `pfrd` (ProportionalFillRandomDistribution) - Random weighted by free space
 - [ ] `lus` - Least used space (MEDIUM)
-- [ ] `pfrd` - Percentage free random distribution (MEDIUM)
 - [ ] `eplfs` - Existing path, least free space (MEDIUM)
 
 
@@ -99,7 +100,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 #### Special Features
 - [x] Runtime policy configuration via xattr on control file (/.mergerfs)
 - [x] Search policy integration into FUSE operations (basic file search)
-- [ ] moveonenospc - Move files when out of space
+- [x] moveonenospc - Move files when out of space (COMPLETED)
 - [ ] Path preservation for "existing path" policies
 - [ ] Direct I/O support
 
@@ -133,11 +134,11 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 3. ✅ **Create policy `epmfs`**: Common balanced distribution policy (COMPLETED)
 
 ### Phase 2: Enhanced Functionality
-1. **moveonenospc**: Automatic file migration on ENOSPC
+1. ✅ **moveonenospc**: Automatic file migration on ENOSPC (COMPLETED)
 2. **Path preservation**: Keep related files together
-3. **Additional policies**: lus, pfrd, newest
-4. **Directory handles**: Proper opendir/releasedir
-5. **Access checks**: Proper permission validation
+3. **Additional policies**: lus, newest (pfrd COMPLETED)
+4. ✅ **Directory handles**: Proper opendir/releasedir (COMPLETED)
+5. ✅ **Access checks**: Proper permission validation (COMPLETED)
 
 ### Phase 3: Advanced Features
 1. **Performance optimizations**: Caching, readdir_plus
@@ -226,6 +227,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Thread-safe handle storage using parking_lot RwLock
 - See `docs/OPENDIR_RELEASEDIR_DESIGN.md` for implementation details
 
+### MoveOnENOSPC Feature
+- Automatically moves files to another branch when write fails with ENOSPC/EDQUOT
+- Configurable via xattr with support for any create policy
+- Preserves file handles and attributes during migration
+- Default policy is PFRD (Proportional Fill Random Distribution)
+- See `docs/MOVEONENOSPC_DESIGN.md` for implementation details
+
 ## Resources
 
 - **Documentation**: See `docs/` directory for detailed design docs
@@ -236,12 +244,12 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Next Steps
 
 1. Implement lus (least used space) create policy
-2. Add moveonenospc feature for automatic file migration
-3. Implement path preservation for remaining "existing path" policies
-4. Add fallocate support for preallocation
-5. Implement fsyncdir for directory synchronization
+2. Implement path preservation for remaining "existing path" policies
+3. Add fallocate support for preallocation
+4. Implement fsyncdir for directory synchronization
+5. Add direct I/O support
 
 ---
 
 *Last Updated: January 2025*
-*Total Progress: ~35% of full mergerfs functionality*
+*Total Progress: ~40% of full mergerfs functionality*

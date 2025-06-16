@@ -67,12 +67,7 @@ impl ConfigManager {
         
         options.insert(
             "moveonenospc".to_string(),
-            Box::new(BooleanOption::new(
-                "moveonenospc",
-                false, // default
-                "Move files to another branch on ENOSPC",
-                config.clone(),
-            )),
+            Box::new(MoveOnENOSPCOption::new(config.clone())),
         );
         
         options.insert(
@@ -196,6 +191,62 @@ impl ConfigOption for CreatePolicyOption {
     }
 }
 
+/// Option for moveonenospc configuration
+struct MoveOnENOSPCOption {
+    config: ConfigRef,
+}
+
+impl MoveOnENOSPCOption {
+    fn new(config: ConfigRef) -> Self {
+        Self { config }
+    }
+}
+
+impl ConfigOption for MoveOnENOSPCOption {
+    fn name(&self) -> &str {
+        "moveonenospc"
+    }
+    
+    fn get_value(&self) -> String {
+        let config = self.config.read();
+        if config.moveonenospc.enabled {
+            config.moveonenospc.policy_name.clone()
+        } else {
+            "false".to_string()
+        }
+    }
+    
+    fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
+        let mut config = self.config.write();
+        
+        match value.to_lowercase().as_str() {
+            "false" | "0" | "no" | "off" => {
+                config.moveonenospc.enabled = false;
+                Ok(())
+            }
+            "true" | "1" | "yes" | "on" => {
+                config.moveonenospc.enabled = true;
+                config.moveonenospc.policy_name = "pfrd".to_string(); // Default policy
+                Ok(())
+            }
+            // Check if it's a valid policy name
+            "ff" | "mfs" | "lfs" | "rand" | "epmfs" | "pfrd" => {
+                config.moveonenospc.enabled = true;
+                config.moveonenospc.policy_name = value.to_string();
+                Ok(())
+            }
+            _ => Err(ConfigError::InvalidValue(format!(
+                "Invalid moveonenospc value: {}. Use 'true', 'false', or a valid create policy name",
+                value
+            ))),
+        }
+    }
+    
+    fn help(&self) -> &str {
+        "Move files to another branch on ENOSPC. Values: true, false, or a create policy name (ff, mfs, lfs, rand, epmfs, pfrd)"
+    }
+}
+
 /// Generic boolean option
 struct BooleanOption {
     name: String,
@@ -312,17 +363,25 @@ mod tests {
     }
     
     #[test]
-    fn test_boolean_option() {
+    fn test_moveonenospc_option() {
         let config = config::create_config();
         let manager = ConfigManager::new(config);
         
-        // Test getting default value
+        // Test getting default value (enabled with pfrd)
         let value = manager.get_option("moveonenospc").unwrap();
-        assert_eq!(value, "false");
+        assert_eq!(value, "pfrd");
         
-        // Test setting valid values
+        // Test disabling
+        assert!(manager.set_option("moveonenospc", "false").is_ok());
+        assert_eq!(manager.get_option("moveonenospc").unwrap(), "false");
+        
+        // Test enabling with true (should use default pfrd)
         assert!(manager.set_option("moveonenospc", "true").is_ok());
-        assert_eq!(manager.get_option("moveonenospc").unwrap(), "true");
+        assert_eq!(manager.get_option("moveonenospc").unwrap(), "pfrd");
+        
+        // Test setting specific policies
+        assert!(manager.set_option("moveonenospc", "mfs").is_ok());
+        assert_eq!(manager.get_option("moveonenospc").unwrap(), "mfs");
         
         assert!(manager.set_option("moveonenospc", "0").is_ok());
         assert_eq!(manager.get_option("moveonenospc").unwrap(), "false");

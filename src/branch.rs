@@ -37,6 +37,19 @@ impl Branch {
     pub fn full_path(&self, relative_path: &Path) -> PathBuf {
         self.path.join(relative_path.strip_prefix("/").unwrap_or(relative_path))
     }
+    
+    pub fn free_space(&self) -> Result<u64, std::io::Error> {
+        use nix::sys::statvfs::statvfs;
+        
+        let stat = statvfs(&self.path).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
+        
+        // Calculate free space in bytes
+        // Use blocks_available (f_bavail - blocks available to unprivileged users)
+        let free_bytes = stat.blocks_available() as u64 * stat.fragment_size() as u64;
+        Ok(free_bytes)
+    }
 }
 
 

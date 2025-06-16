@@ -8,6 +8,7 @@ use crate::policy::{FirstFoundSearchPolicy, FirstFoundCreatePolicy};
 use crate::config_manager::ConfigManager;
 use crate::rename_ops::RenameManager;
 use crate::permissions::{check_access, AccessError};
+use crate::moveonenospc::{MoveOnENOSPCHandler, is_out_of_space_error};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
     ReplyOpen, ReplyWrite, Request,
@@ -46,6 +47,7 @@ pub struct MergerFS {
     pub xattr_manager: Arc<XattrManager>,
     pub config_manager: Arc<ConfigManager>,
     pub rename_manager: Arc<RenameManager>,
+    pub moveonenospc_handler: Arc<MoveOnENOSPCHandler>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
     next_inode: std::sync::atomic::AtomicU64,
     dir_handles: parking_lot::RwLock<HashMap<u64, DirHandle>>,
@@ -113,14 +115,17 @@ impl MergerFS {
             attr: root_attr,
         });
         
+        let moveonenospc_handler = MoveOnENOSPCHandler::new(config.clone());
+        
         Self {
             file_manager: Arc::new(file_manager),
             metadata_manager: Arc::new(metadata_manager),
-            config,
+            config: config.clone(),
             file_handle_manager: Arc::new(FileHandleManager::new()),
             xattr_manager: Arc::new(xattr_manager),
             config_manager: Arc::new(config_manager),
             rename_manager: Arc::new(rename_manager),
+            moveonenospc_handler: Arc::new(moveonenospc_handler),
             inodes: parking_lot::RwLock::new(inodes),
             next_inode: std::sync::atomic::AtomicU64::new(2),
             dir_handles: parking_lot::RwLock::new(HashMap::new()),
@@ -741,10 +746,95 @@ impl Filesystem for MergerFS {
                 }
                 reply.written(data.len() as u32);
             }
+            Err(PolicyError::IoError(io_err)) if is_out_of_space_error(&io_err) && self.moveonenospc_handler.is_enabled() => {
+                // Handle ENOSPC with moveonenospc
+                tracing::info!("Write failed with ENOSPC, attempting moveonenospc for {:?}", path);
+                
+                // Determine which branch has the file
+                let current_branch_idx = if let Some(h) = &handle {
+                    h.branch_idx
+                } else {
+                    // Find which branch has the file
+                    self.file_manager.branches.iter().position(|b| {
+                        b.full_path(path).exists()
+                    })
+                }.unwrap_or(0);
+                
+                // Attempt to move the file
+                match self.moveonenospc_handler.move_file_on_enospc(
+                    path,
+                    current_branch_idx,
+                    &self.file_manager.branches,
+                    self.file_manager.create_policy.as_ref(),
+                    None, // We don't have raw fd here
+                ) {
+                    Ok(move_result) => {
+                        tracing::info!("File moved to branch {} at {:?}", move_result.new_branch_idx, move_result.new_path);
+                        
+                        // Update file handle if we have one
+                        if let Some(h) = handle {
+                            self.file_handle_manager.update_branch(fh, move_result.new_branch_idx);
+                        }
+                        
+                        // Retry the write on the new branch
+                        let retry_result = {
+                            let branch = &self.file_manager.branches[move_result.new_branch_idx];
+                            let full_path = branch.full_path(path);
+                            
+                            use std::fs::OpenOptions;
+                            use std::io::{Seek, SeekFrom, Write};
+                            
+                            match OpenOptions::new()
+                                .write(true)
+                                .open(&full_path) {
+                                Ok(mut file) => {
+                                    match file.seek(SeekFrom::Start(offset as u64)) {
+                                        Ok(_) => {
+                                            match file.write_all(data) {
+                                                Ok(_) => {
+                                                    let _ = file.sync_all();
+                                                    Ok(())
+                                                }
+                                                Err(e) => Err(PolicyError::IoError(e))
+                                            }
+                                        }
+                                        Err(e) => Err(PolicyError::IoError(e))
+                                    }
+                                }
+                                Err(e) => Err(PolicyError::IoError(e))
+                            }
+                        };
+                        
+                        match retry_result {
+                            Ok(_) => {
+                                tracing::info!("Write successful after moveonenospc: {} bytes written", data.len());
+                                // Update file size in inode
+                                let mut inodes = self.inodes.write();
+                                if let Some(inode_data) = inodes.get_mut(&ino) {
+                                    let end_pos = (offset as u64) + (data.len() as u64);
+                                    let new_size = std::cmp::max(inode_data.attr.size, end_pos);
+                                    inode_data.attr.size = new_size;
+                                    inode_data.attr.blocks = (new_size + 511) / 512;
+                                    inode_data.attr.mtime = SystemTime::now();
+                                }
+                                reply.written(data.len() as u32);
+                            }
+                            Err(e) => {
+                                error!("Write still failed after moveonenospc: {:?}", e);
+                                reply.error(io_err.raw_os_error().unwrap_or(EIO));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to move file on ENOSPC: {:?}", e);
+                        reply.error(io_err.raw_os_error().unwrap_or(EIO));
+                    }
+                }
+            }
             Err(e) => {
                 error!("Failed to write to file {:?}: {:?}", path, e);
                 tracing::debug!("Write error details - offset: {}, size: {}, error: {:?}", offset, data.len(), e);
-                reply.error(EIO);
+                reply.error(e.errno());
             }
         }
     }

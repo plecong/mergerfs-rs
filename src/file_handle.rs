@@ -51,6 +51,13 @@ impl FileHandleManager {
     pub fn get_handle_count(&self) -> usize {
         self.handles.read().len()
     }
+    
+    pub fn update_branch(&self, fh: u64, new_branch_idx: usize) {
+        if let Some(handle) = self.handles.write().get_mut(&fh) {
+            handle.branch_idx = Some(new_branch_idx);
+            tracing::debug!("Updated file handle {} to use branch {}", fh, new_branch_idx);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ mod fuse_integration_tests;
 mod directory_ops_tests;
 mod rename_ops;
 mod permissions;
+mod moveonenospc;
 
 #[cfg(test)]
 mod test_utils;
