@@ -10,12 +10,23 @@ from typing import List, Generator
 
 from lib.fuse_manager import FuseManager, FuseConfig, FileSystemState
 from lib.tmpfs_manager import TmpfsManager, get_tmpfs_manager
+try:
+    from lib.timing_utils import SmartWaitHelper
+except ImportError:
+    SmartWaitHelper = None
+try:
+    from lib.simple_trace import SimpleWaitHelper
+except ImportError:
+    SimpleWaitHelper = None
+import os
 
 
 @pytest.fixture(scope="session")
 def fuse_manager() -> Generator[FuseManager, None, None]:
     """Session-scoped FUSE manager that handles cleanup."""
-    manager = FuseManager()
+    # Enable trace monitoring if requested via environment
+    enable_trace = os.getenv('FUSE_TRACE', '').lower() in ('1', 'true', 'yes')
+    manager = FuseManager(enable_trace=enable_trace)
     try:
         yield manager
     finally:
@@ -57,10 +68,13 @@ def temp_mountpoint(fuse_manager: FuseManager) -> Path:
 @pytest.fixture
 def fuse_config(temp_branches: List[Path], temp_mountpoint: Path) -> FuseConfig:
     """Create a basic FUSE configuration."""
+    # Enable trace if requested
+    enable_trace = os.getenv('FUSE_TRACE', '').lower() in ('1', 'true', 'yes')
     return FuseConfig(
         policy="ff",
         branches=temp_branches,
-        mountpoint=temp_mountpoint
+        mountpoint=temp_mountpoint,
+        enable_trace=enable_trace
     )
 
 
@@ -79,8 +93,44 @@ def policy(request) -> str:
 @pytest.fixture
 def mounted_fs(fuse_manager: FuseManager, fuse_config: FuseConfig):
     """Fixture that provides a mounted filesystem."""
-    with fuse_manager.mounted_fs(fuse_config) as (process, mountpoint, branches):
-        yield process, mountpoint, branches
+    with fuse_manager.mounted_fs(fuse_config) as result:
+        # Handle both trace and non-trace cases
+        if len(result) == 4:
+            # Trace monitoring enabled
+            yield result
+        else:
+            # No trace monitoring
+            yield result
+
+
+@pytest.fixture
+def mounted_fs_with_trace(fuse_manager: FuseManager, temp_branches: List[Path], temp_mountpoint: Path):
+    """Fixture that provides a mounted filesystem with trace monitoring enabled."""
+    config = FuseConfig(
+        policy="ff",
+        branches=temp_branches,
+        mountpoint=temp_mountpoint,
+        enable_trace=True
+    )
+    with fuse_manager.mounted_fs(config) as result:
+        if len(result) == 4:
+            yield result
+        else:
+            # Fallback if trace monitoring isn't available
+            process, mountpoint, branches = result
+            yield process, mountpoint, branches, None
+
+
+@pytest.fixture
+def smart_wait(fuse_manager: FuseManager, mounted_fs):
+    """Provide a SmartWaitHelper for the mounted filesystem."""
+    # Extract mountpoint from mounted_fs result
+    if len(mounted_fs) >= 2:
+        mountpoint = mounted_fs[1]
+    else:
+        raise ValueError("Invalid mounted_fs fixture result")
+        
+    return fuse_manager.get_smart_wait_helper(mountpoint)
 
 
 # Markers for different test types

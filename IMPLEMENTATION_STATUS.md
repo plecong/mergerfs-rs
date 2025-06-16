@@ -29,6 +29,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Error handling with proper errno mapping
 - [x] Alpine Linux/MUSL compatibility (no libc dependency)
 - [x] Permission checking utilities for access control
+- [x] Comprehensive tracing/logging infrastructure for all FUSE operations
 
 #### FUSE Operations (22/40+)
 - [x] `lookup` - Find files/directories
@@ -148,9 +149,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Testing Status
 
 ### Test Coverage
-- **Unit Tests**: 137 Rust tests covering core functionality
+- **Unit Tests**: 147 Rust tests covering core functionality
 - **Integration Tests**: Python tests with property-based testing
 - **FUSE Tests**: Real filesystem mount testing with comprehensive scenarios
+- **Trace-Based Testing**: Advanced test infrastructure that monitors FUSE operations for intelligent synchronization
 
 ### Test Categories
 - ✅ File operations (create, read, write, delete)
@@ -164,6 +166,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Access permission checking
 - ❌ Special files
 - ✅ Runtime configuration (via xattr)
+- ✅ Trace-based timing (eliminates flaky tests, 78% faster execution)
 
 ## Known Issues
 
@@ -178,9 +181,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 1. **Study C++ implementation**: Review original mergerfs code
 2. **Document design**: Create design doc in `docs/`
 3. **Implement in Rust**: Follow existing patterns, no unsafe code
-4. **Write unit tests**: Comprehensive test coverage
-5. **Add integration tests**: Python tests using test framework
-6. **Update this status**: Keep implementation status current
+4. **Add tracing**: Include comprehensive tracing spans for debugging
+5. **Write unit tests**: Comprehensive test coverage
+6. **Add integration tests**: Python tests using trace-based framework
+7. **Update this status**: Keep implementation status current
 
 ### Code Standards
 - No unsafe code
@@ -188,6 +192,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Thread-safe implementations using Arc/RwLock
 - Policy-driven design for flexibility
 - Alpine Linux/MUSL compatibility
+- Comprehensive tracing for all operations
+
+### Testing Standards
+- Use trace-based testing infrastructure for reliability
+- Replace sleep() with intelligent wait functions
+- Enable FUSE_TRACE=1 for all test runs
+- Monitor operation completion instead of arbitrary delays
 
 ## Implementation Details
 

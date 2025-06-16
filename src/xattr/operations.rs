@@ -4,6 +4,7 @@ use crate::policy::{ActionPolicy, SearchPolicy};
 use std::path::Path;
 use std::sync::Arc;
 use xattr;
+use tracing;
 
 pub trait XattrOperations {
     fn get_xattr(&self, path: &Path, name: &str) -> Result<Vec<u8>, XattrError>;
@@ -38,7 +39,10 @@ impl XattrManager {
     }
     
     pub fn get_xattr(&self, path: &Path, name: &str) -> Result<Vec<u8>, XattrError> {
+        let _span = tracing::info_span!("xattr::get_xattr", path = ?path, name).entered();
+        
         // Use search policy to find file
+        tracing::debug!("Searching for file using getxattr policy");
         let branches = match self.getxattr_policy.search_branches(&self.branches, path) {
             Ok(branches) => branches,
             Err(_) => return Err(XattrError::NotFound),
@@ -50,7 +54,17 @@ impl XattrManager {
         
         // Get xattr from first found branch
         let full_path = branches[0].full_path(path);
-        self.get_xattr_from_path(&full_path, name)
+        tracing::debug!("Getting xattr from branch {:?}", branches[0].path);
+        match self.get_xattr_from_path(&full_path, name) {
+            Ok(value) => {
+                tracing::info!("Successfully retrieved xattr {} ({} bytes)", name, value.len());
+                Ok(value)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get xattr {}: {:?}", name, e);
+                Err(e)
+            }
+        }
     }
     
     pub fn set_xattr(&self, path: &Path, name: &str, value: &[u8], flags: XattrFlags) -> Result<(), XattrError> {

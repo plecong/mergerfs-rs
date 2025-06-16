@@ -515,14 +515,14 @@ impl Filesystem for MergerFS {
         _req: &Request,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        _flags: i32,
+        mode: u32,
+        umask: u32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
         let name_str = name.to_str().unwrap_or("<invalid>");
-        let _span = tracing::info_span!("fuse::create", parent, name = %name_str).entered();
-        tracing::debug!("Starting create");
+        let _span = tracing::info_span!("fuse::create", parent, name = %name_str, mode = %format!("{:o}", mode), umask = %format!("{:o}", umask), flags = %format!("0x{:x}", flags)).entered();
+        tracing::debug!("Starting create operation");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -548,8 +548,10 @@ impl Filesystem for MergerFS {
 
         // Create empty file using file manager
         let path = Path::new(&file_path);
+        tracing::debug!("Creating file at path: {:?}", file_path);
         match self.file_manager.create_file(path, &[]) {
             Ok(_) => {
+                tracing::info!("File created successfully at {:?}", file_path);
                 // Create file attributes
                 if let Some(mut attr) = self.create_file_attr(path) {
                     let ino = self.allocate_inode();
@@ -567,8 +569,9 @@ impl Filesystem for MergerFS {
                 }
             }
             Err(e) => {
-                error!("Failed to create file: {:?}", e);
+                error!("Failed to create file at {:?}: {:?}", file_path, e);
                 let errno = e.errno();
+                tracing::debug!("Returning errno {} for create failure", errno);
                 reply.error(errno);
             }
         }
@@ -581,21 +584,23 @@ impl Filesystem for MergerFS {
         fh: u64,
         offset: i64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
+        write_flags: u32,
+        flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let _span = tracing::info_span!("fuse::write", ino, fh, offset, len = data.len()).entered();
-        tracing::debug!("Starting write");
+        let _span = tracing::info_span!("fuse::write", ino, fh, offset, len = data.len(), write_flags = %format!("0x{:x}", write_flags), flags = %format!("0x{:x}", flags)).entered();
+        tracing::debug!("Starting write operation");
 
         // Try to get file handle first
         let handle = self.file_handle_manager.get_handle(fh);
         
         // Get the path - either from handle or inode
         let (path_buf, branch_idx) = if let Some(h) = &handle {
+            tracing::debug!("Using file handle {} for path {:?}, branch {:?}", fh, h.path, h.branch_idx);
             (h.path.clone(), h.branch_idx)
         } else {
+            tracing::debug!("No file handle found for fh {}, falling back to inode lookup", fh);
             // Fallback to using inode data
             let inode_data = match self.get_inode_data(ino) {
                 Some(data) => data,
@@ -610,6 +615,7 @@ impl Filesystem for MergerFS {
         let path = path_buf.as_path();
         
         // If we have a file handle with a specific branch, write to that branch
+        tracing::debug!("Writing to path {:?} with branch_idx {:?}", path, branch_idx);
         let result = if let Some(branch_idx) = branch_idx {
                 if branch_idx < self.file_manager.branches.len() {
                     let branch = &self.file_manager.branches[branch_idx];
@@ -655,6 +661,7 @@ impl Filesystem for MergerFS {
 
         match result {
             Ok(_) => {
+                tracing::info!("Write successful: {} bytes written at offset {} to {:?}", data.len(), offset, path);
                 // Update file size in inode
                 let mut inodes = self.inodes.write();
                 if let Some(inode_data) = inodes.get_mut(&ino) {
@@ -673,7 +680,8 @@ impl Filesystem for MergerFS {
                 reply.written(data.len() as u32);
             }
             Err(e) => {
-                error!("Failed to write file: {:?}", e);
+                error!("Failed to write to file {:?}: {:?}", path, e);
+                tracing::debug!("Write error details - offset: {}, size: {}, error: {:?}", offset, data.len(), e);
                 reply.error(EIO);
             }
         }
@@ -684,11 +692,13 @@ impl Filesystem for MergerFS {
         _req: &Request,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        mode: u32,
+        umask: u32,
         reply: ReplyEntry,
     ) {
-        info!("mkdir: parent={}, name={:?}", parent, name);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::mkdir", parent, name = %name_str, mode = %format!("{:o}", mode), umask = %format!("{:o}", umask)).entered();
+        tracing::debug!("Starting mkdir operation");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -714,8 +724,10 @@ impl Filesystem for MergerFS {
 
         // Create directory using file manager
         let path = Path::new(&dir_path);
+        tracing::debug!("Creating directory at path: {:?}", dir_path);
         match self.file_manager.create_directory(path) {
             Ok(_) => {
+                tracing::info!("Directory created successfully at {:?}", dir_path);
                 // Create directory attributes
                 if let Some(mut attr) = self.create_file_attr(path) {
                     let ino = self.allocate_inode();
@@ -733,14 +745,17 @@ impl Filesystem for MergerFS {
                 }
             }
             Err(e) => {
-                error!("Failed to create directory: {:?}", e);
+                error!("Failed to create directory at {:?}: {:?}", dir_path, e);
+                tracing::debug!("Directory creation error details: {:?}", e);
                 reply.error(EIO);
             }
         }
     }
 
     fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        info!("rmdir: parent={}, name={:?}", parent, name);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::rmdir", parent, name = %name_str).entered();
+        tracing::debug!("Starting rmdir operation");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -765,8 +780,10 @@ impl Filesystem for MergerFS {
         };
 
         let path = Path::new(&dir_path);
+        tracing::debug!("Removing directory at path: {:?}", dir_path);
         match self.file_manager.remove_directory(path) {
             Ok(_) => {
+                tracing::info!("Directory removed successfully: {:?}", dir_path);
                 // Remove from inode cache if it exists
                 let mut inodes = self.inodes.write();
                 let mut inode_to_remove = None;
@@ -782,7 +799,7 @@ impl Filesystem for MergerFS {
                 reply.ok();
             }
             Err(e) => {
-                error!("Failed to remove directory: {:?}", e);
+                error!("Failed to remove directory {:?}: {:?}", dir_path, e);
                 // Map common errors to appropriate errno values
                 let errno = match e {
                     PolicyError::NoBranchesAvailable => ENOENT,
@@ -801,7 +818,9 @@ impl Filesystem for MergerFS {
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        info!("unlink: parent={}, name={:?}", parent, name);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::unlink", parent, name = %name_str).entered();
+        tracing::debug!("Starting unlink operation");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -826,8 +845,10 @@ impl Filesystem for MergerFS {
         };
 
         let path = Path::new(&file_path);
+        tracing::debug!("Removing file at path: {:?}", file_path);
         match self.file_manager.remove_file(path) {
             Ok(_) => {
+                tracing::info!("File unlinked successfully: {:?}", file_path);
                 // Remove from inode cache if it exists
                 let mut inodes = self.inodes.write();
                 let mut inode_to_remove = None;
@@ -843,7 +864,7 @@ impl Filesystem for MergerFS {
                 reply.ok();
             }
             Err(e) => {
-                error!("Failed to remove file: {:?}", e);
+                error!("Failed to unlink file {:?}: {:?}", file_path, e);
                 let errno = match e {
                     PolicyError::NoBranchesAvailable => ENOENT,
                     PolicyError::IoError(_) => EIO,
@@ -865,14 +886,25 @@ impl Filesystem for MergerFS {
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
+        fh: Option<u64>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
+        flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        info!("setattr: ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}", ino, mode, uid, gid, size);
+        let _span = tracing::info_span!("fuse::setattr", 
+            ino, 
+            mode = ?mode.map(|m| format!("{:o}", m)), 
+            uid = ?uid, 
+            gid = ?gid, 
+            size = ?size,
+            atime = ?atime.is_some(),
+            mtime = ?mtime.is_some(),
+            fh = ?fh,
+            flags = ?flags.map(|f| format!("0x{:x}", f))
+        ).entered();
+        tracing::debug!("Starting setattr operation");
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -887,7 +919,7 @@ impl Filesystem for MergerFS {
 
         // Handle truncate
         if let Some(new_size) = size {
-            info!("Truncating file {} to size {}", inode_data.path, new_size);
+            tracing::info!("Truncating file {} to size {}", inode_data.path, new_size);
             
             match self.file_manager.truncate_file(path, new_size) {
                 Ok(_) => {
@@ -907,26 +939,28 @@ impl Filesystem for MergerFS {
 
         // Handle chmod
         if let Some(new_mode) = mode {
+            tracing::debug!("Applying chmod {:o} to {}", new_mode, inode_data.path);
             match self.metadata_manager.chmod(path, new_mode) {
                 Ok(_) => {
                     had_success = true;
-                    debug!("chmod successful for {}", inode_data.path);
+                    tracing::info!("chmod successful: mode {:o} applied to {}", new_mode, inode_data.path);
                 }
                 Err(e) => {
-                    error!("chmod failed for {}: {:?}", inode_data.path, e);
+                    error!("chmod failed for {} (mode {:o}): {:?}", inode_data.path, new_mode, e);
                 }
             }
         }
 
         // Handle chown
         if let (Some(new_uid), Some(new_gid)) = (uid, gid) {
+            tracing::debug!("Applying chown {}:{} to {}", new_uid, new_gid, inode_data.path);
             match self.metadata_manager.chown(path, new_uid, new_gid) {
                 Ok(_) => {
                     had_success = true;
-                    debug!("chown successful for {}", inode_data.path);
+                    tracing::info!("chown successful: uid={}, gid={} applied to {}", new_uid, new_gid, inode_data.path);
                 }
                 Err(e) => {
-                    error!("chown failed for {}: {:?}", inode_data.path, e);
+                    error!("chown failed for {} (uid={}, gid={}): {:?}", inode_data.path, new_uid, new_gid, e);
                 }
             }
         }
@@ -1114,11 +1148,13 @@ impl Filesystem for MergerFS {
         name: &OsStr,
         newparent: u64,
         newname: &OsStr,
-        _flags: u32,
+        flags: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        info!("rename: parent={}, name={:?} -> newparent={}, newname={:?}", 
-            parent, name, newparent, newname);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let newname_str = newname.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::rename", parent, name = %name_str, newparent, newname = %newname_str, flags = %format!("0x{:x}", flags)).entered();
+        tracing::debug!("Starting rename operation");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -1164,11 +1200,12 @@ impl Filesystem for MergerFS {
             format!("{}/{}", newparent_data.path, newname_str)
         };
 
-        debug!("Resolved paths - old: {:?}, new: {:?}", old_path, new_path);
+        tracing::info!("Rename operation: {:?} -> {:?}", old_path, new_path);
 
         // Use RenameManager to handle the rename operation
         match self.rename_manager.rename(Path::new(&old_path), Path::new(&new_path)) {
             Ok(()) => {
+                tracing::info!("Rename successful: {:?} -> {:?}", old_path, new_path);
                 // Update inode cache
                 let mut inodes = self.inodes.write();
                 let mut updates = Vec::new();
@@ -1192,8 +1229,10 @@ impl Filesystem for MergerFS {
                 reply.ok();
             }
             Err(e) => {
-                error!("Rename failed: {:?}", e);
-                reply.error(e.to_errno());
+                error!("Rename failed for {:?} -> {:?}: {:?}", old_path, new_path, e);
+                let errno = e.to_errno();
+                tracing::debug!("Rename error errno: {}", errno);
+                reply.error(errno);
             }
         }
     }
@@ -1470,7 +1509,9 @@ impl Filesystem for MergerFS {
         size: u32,
         reply: fuser::ReplyXattr,
     ) {
-        info!("getxattr: ino={}, name={:?}, size={}", ino, name, size);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::getxattr", ino, name = %name_str, size).entered();
+        tracing::debug!("Starting getxattr operation");
         
         // Handle control file xattr
         if ino == CONTROL_FILE_INO {
@@ -1517,6 +1558,7 @@ impl Filesystem for MergerFS {
         
         match self.xattr_manager.get_xattr(path, name_str) {
             Ok(value) => {
+                tracing::info!("getxattr successful: {} = {} bytes for {:?}", name_str, value.len(), inode_data.path);
                 if size == 0 {
                     // Caller is asking for the size
                     reply.size(value.len() as u32);
@@ -1542,11 +1584,12 @@ impl Filesystem for MergerFS {
         name: &OsStr,
         value: &[u8],
         flags: i32,
-        _position: u32,
+        position: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        info!("setxattr: ino={}, name={:?}, value_len={}, flags={}", 
-            ino, name, value.len(), flags);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::setxattr", ino, name = %name_str, value_len = value.len(), flags = %format!("0x{:x}", flags), position).entered();
+        tracing::debug!("Starting setxattr operation");
             
         // Handle control file xattr
         if ino == CONTROL_FILE_INO {
@@ -1598,8 +1641,14 @@ impl Filesystem for MergerFS {
         };
         
         match self.xattr_manager.set_xattr(path, name_str, value, xattr_flags) {
-            Ok(_) => reply.ok(),
-            Err(XattrError::NotFound) => reply.error(ENOENT),
+            Ok(_) => {
+                tracing::info!("setxattr successful: {} = {} bytes for {:?}", name_str, value.len(), inode_data.path);
+                reply.ok();
+            }
+            Err(XattrError::NotFound) => {
+                tracing::debug!("setxattr failed: file not found");
+                reply.error(ENOENT);
+            }
             Err(XattrError::PermissionDenied) => reply.error(EACCES),
             Err(XattrError::InvalidArgument) => reply.error(EINVAL),
             Err(XattrError::NameTooLong) => reply.error(36), // ENAMETOOLONG
@@ -1610,7 +1659,8 @@ impl Filesystem for MergerFS {
     }
 
     fn listxattr(&mut self, _req: &Request, ino: u64, size: u32, reply: fuser::ReplyXattr) {
-        info!("listxattr: ino={}, size={}", ino, size);
+        let _span = tracing::info_span!("fuse::listxattr", ino, size).entered();
+        tracing::debug!("Starting listxattr operation");
         
         // Handle control file xattr
         if ino == CONTROL_FILE_INO {
@@ -1645,6 +1695,7 @@ impl Filesystem for MergerFS {
         
         match self.xattr_manager.list_xattr(path) {
             Ok(attrs) => {
+                tracing::info!("listxattr successful: found {} attributes for {:?}", attrs.len(), inode_data.path);
                 // Build null-terminated list of attribute names
                 let mut data = Vec::new();
                 for attr in &attrs {
@@ -1670,7 +1721,9 @@ impl Filesystem for MergerFS {
     }
 
     fn removexattr(&mut self, _req: &Request, ino: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        info!("removexattr: ino={}, name={:?}", ino, name);
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::removexattr", ino, name = %name_str).entered();
+        tracing::debug!("Starting removexattr operation");
 
         let inode_data = match self.get_inode_data(ino) {
             Some(data) => data,
@@ -1690,8 +1743,14 @@ impl Filesystem for MergerFS {
         };
         
         match self.xattr_manager.remove_xattr(path, name_str) {
-            Ok(_) => reply.ok(),
-            Err(XattrError::NotFound) => reply.error(61), // ENOATTR
+            Ok(_) => {
+                tracing::info!("removexattr successful: removed {} from {:?}", name_str, inode_data.path);
+                reply.ok();
+            }
+            Err(XattrError::NotFound) => {
+                tracing::debug!("removexattr failed: attribute not found");
+                reply.error(61); // ENOATTR
+            }
             Err(XattrError::PermissionDenied) => reply.error(EACCES),
             Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
             Err(_) => reply.error(EIO),

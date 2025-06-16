@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::fs;
 use std::io;
 use thiserror::Error;
-use tracing::debug;
+use tracing;
 
 use crate::branch::{Branch, BranchMode};
 use crate::policy::{ActionPolicy, SearchPolicy, CreatePolicy, PolicyError};
@@ -114,25 +114,33 @@ impl RenameManager {
     }
     
     pub fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), RenameError> {
-        debug!("RenameManager::rename - old_path: {:?}, new_path: {:?}", old_path, new_path);
+        let _span = tracing::info_span!("rename::rename", old = ?old_path, new = ?new_path).entered();
+        tracing::debug!("Starting rename operation");
         
         // Determine which strategy to use
         let config = self.config.read();
         let use_path_preserving = self.create_policy.is_path_preserving() && 
                                   !config.ignore_path_preserving_on_rename;
         
-        debug!("Using {} rename strategy", 
-               if use_path_preserving { "path-preserving" } else { "create-path" });
+        let strategy = if use_path_preserving { "path-preserving" } else { "create-path" };
+        tracing::info!("Using {} rename strategy", strategy);
         
-        if use_path_preserving {
+        let result = if use_path_preserving {
             self.rename_preserve_path(old_path, new_path)
         } else {
             self.rename_create_path(old_path, new_path)
+        };
+        
+        match &result {
+            Ok(_) => tracing::info!("Rename completed successfully"),
+            Err(e) => tracing::error!("Rename failed: {:?}", e),
         }
+        result
     }
     
     fn rename_preserve_path(&self, old_path: &Path, new_path: &Path) -> Result<(), RenameError> {
-        debug!("rename_preserve_path: {:?} -> {:?}", old_path, new_path);
+        let _span = tracing::debug_span!("rename::preserve_path", old = ?old_path, new = ?new_path).entered();
+        tracing::debug!("Starting path-preserving rename");
         
         // 1. Find branches where source file exists using action policy
         let source_branches = self.action_policy.select_branches(&self.branches, old_path)?;
@@ -161,11 +169,14 @@ impl RenameManager {
             
             // 4. Attempt rename on this branch
             let old_full_path = branch.full_path(old_path);
+            tracing::debug!("Attempting rename on branch {:?}: {:?} -> {:?}", branch.path, old_full_path, new_full_path);
             match fs::rename(&old_full_path, &new_full_path) {
                 Ok(()) => {
+                    tracing::debug!("Rename successful on branch {:?}", branch.path);
                     success = true;
                 }
                 Err(e) => {
+                    tracing::warn!("Rename failed on branch {:?}: {:?}", branch.path, e);
                     last_error = Some(io_error_to_rename_error(e));
                     to_remove.push(old_full_path);
                 }
@@ -186,7 +197,8 @@ impl RenameManager {
     }
     
     fn rename_create_path(&self, old_path: &Path, new_path: &Path) -> Result<(), RenameError> {
-        debug!("rename_create_path: {:?} -> {:?}", old_path, new_path);
+        let _span = tracing::debug_span!("rename::create_path", old = ?old_path, new = ?new_path).entered();
+        tracing::debug!("Starting create-path rename");
         
         // 1. Find branches where source file exists using action policy
         let source_branches = self.action_policy.select_branches(&self.branches, old_path)?;

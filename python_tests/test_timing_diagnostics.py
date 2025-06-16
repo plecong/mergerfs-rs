@@ -1,105 +1,150 @@
 #!/usr/bin/env python3
 """
-Test to demonstrate improved timing diagnostics for FUSE operations.
+Diagnostic test to measure and compare timing approaches.
+
+This test clearly shows the benefit of trace-based waiting over hardcoded sleeps.
 """
 
-import os
 import time
+import pytest
 from pathlib import Path
-from lib.fuse_manager import FuseManager, FuseConfig
-from lib.timing_utils import TimingAnalyzer
+from lib.simple_trace import SimpleWaitHelper
 
 
-def test_timing_diagnostics():
-    """Test FUSE operations with timing diagnostics."""
-    # Enable debug logging for detailed timing
-    os.environ['RUST_LOG'] = 'debug'
-    os.environ['FUSE_DEBUG_LOGS'] = '1'
+@pytest.mark.integration
+class TestTimingDiagnostics:
+    """Diagnostic tests for timing improvements."""
     
-    manager = FuseManager()
-    analyzer = TimingAnalyzer()
-    
-    # Create branches and mountpoint
-    branches = manager.create_temp_dirs(3)
-    mountpoint = manager.create_temp_mountpoint()
-    
-    print(f"Branches: {branches}")
-    print(f"Mountpoint: {mountpoint}")
-    
-    config = FuseConfig(policy="mfs", branches=branches, mountpoint=mountpoint)
-    
-    try:
-        print("\n=== Mount Timing ===")
-        mount_start = time.time()
-        process = manager.mount(config)
-        mount_time = time.time() - mount_start
-        print(f"Total mount time: {mount_time:.3f}s")
+    def test_file_operations_timing(self, mounted_fs_with_trace):
+        """Measure actual file operation timings."""
+        process, mountpoint, branches, trace_monitor = mounted_fs_with_trace
+        wait_helper = SimpleWaitHelper(trace_monitor)
         
-        # Perform various operations to measure timing
-        print("\n=== Operation Timing ===")
+        print("\n=== File Operation Timing Analysis ===")
         
-        # 1. Directory creation
-        dir_start = time.time()
-        test_dir = mountpoint / "test_dir"
+        # Test 1: File creation
+        test_file = mountpoint / "timing_test.txt"
+        start = time.time()
+        test_file.write_text("test content")
+        write_time = time.time() - start
+        
+        # Wait for visibility
+        start = time.time()
+        assert wait_helper.wait_for_file_visible(test_file)
+        wait_time = time.time() - start
+        
+        print(f"File write took: {write_time:.3f}s")
+        print(f"Wait for visibility took: {wait_time:.3f}s")
+        print(f"Total time: {write_time + wait_time:.3f}s")
+        print(f"Traditional approach would use: 0.500s (fixed sleep)")
+        print(f"Savings: {0.5 - (write_time + wait_time):.3f}s ({((0.5 - (write_time + wait_time)) / 0.5 * 100):.1f}%)")
+        
+        # Test 2: Directory creation
+        print("\n--- Directory Creation ---")
+        test_dir = mountpoint / "timing_dir"
+        start = time.time()
         test_dir.mkdir()
-        dir_time = time.time() - dir_start
-        print(f"mkdir: {dir_time*1000:.2f}ms")
+        mkdir_time = time.time() - start
         
-        # 2. File creation
-        create_start = time.time()
-        test_file = mountpoint / "test_file.txt"
-        test_file.write_text("Test content")
-        create_time = time.time() - create_start
-        print(f"create + write: {create_time*1000:.2f}ms")
+        start = time.time()
+        assert wait_helper.wait_for_dir_visible(test_dir)
+        wait_time = time.time() - start
         
-        # 3. File read
-        read_start = time.time()
-        content = test_file.read_text()
-        read_time = time.time() - read_start
-        print(f"read: {read_time*1000:.2f}ms")
+        print(f"Directory creation took: {mkdir_time:.3f}s")
+        print(f"Wait for visibility took: {wait_time:.3f}s")
+        print(f"Total time: {mkdir_time + wait_time:.3f}s")
+        print(f"Traditional approach would use: 0.500s (fixed sleep)")
         
-        # 4. Directory listing
-        list_start = time.time()
-        items = list(mountpoint.iterdir())
-        list_time = time.time() - list_start
-        print(f"readdir: {list_time*1000:.2f}ms ({len(items)} items)")
-        
-        # 5. Stat operation
-        stat_start = time.time()
-        stat_info = test_file.stat()
-        stat_time = time.time() - stat_start
-        print(f"stat: {stat_time*1000:.2f}ms")
-        
-        # 6. Multiple file writes (measure policy overhead)
-        print("\n=== Policy Performance (MFS) ===")
-        write_times = []
+        # Test 3: Multiple operations
+        print("\n--- Batch Operations ---")
+        start = time.time()
+        files = []
         for i in range(10):
-            file_path = mountpoint / f"mfs_test_{i}.txt"
-            write_start = time.time()
-            file_path.write_text(f"Content {i}")
-            write_time = time.time() - write_start
-            write_times.append(write_time * 1000)
+            f = mountpoint / f"batch_{i}.txt"
+            f.write_text(f"content {i}")
+            files.append(f)
             
-        avg_write = sum(write_times) / len(write_times)
-        min_write = min(write_times)
-        max_write = max(write_times)
-        print(f"File writes: avg={avg_write:.2f}ms, min={min_write:.2f}ms, max={max_write:.2f}ms")
-        
-        # Check branch distribution
-        print("\n=== Branch Distribution ===")
-        for i, branch in enumerate(branches):
-            files = list(branch.glob("mfs_test_*.txt"))
-            print(f"Branch {i}: {len(files)} files")
+        # Wait for all files
+        for f in files:
+            assert wait_helper.wait_for_file_visible(f)
             
-    finally:
-        print("\n=== Unmount Timing ===")
-        unmount_start = time.time()
-        manager.unmount(mountpoint)
-        unmount_time = time.time() - unmount_start
-        print(f"Unmount time: {unmount_time:.3f}s")
+        batch_time = time.time() - start
+        print(f"Created and verified 10 files in: {batch_time:.3f}s")
+        print(f"Traditional approach would use: {10 * 0.5:.1f}s (0.5s per file)")
+        print(f"Savings: {(10 * 0.5) - batch_time:.3f}s ({((10 * 0.5 - batch_time) / (10 * 0.5) * 100):.1f}%)")
         
-        manager.cleanup()
-
-
-if __name__ == "__main__":
-    test_timing_diagnostics()
+    def test_sleep_vs_smart_wait_comparison(self, mounted_fs_with_trace):
+        """Direct comparison of sleep vs smart wait."""
+        process, mountpoint, branches, trace_monitor = mounted_fs_with_trace
+        wait_helper = SimpleWaitHelper(trace_monitor)
+        
+        print("\n=== Sleep vs Smart Wait Comparison ===")
+        
+        # Method 1: Traditional sleep
+        print("\nMethod 1: Traditional Sleep")
+        file1 = mountpoint / "sleep_test.txt"
+        start = time.time()
+        file1.write_text("content")
+        time.sleep(0.5)  # Traditional approach
+        assert file1.exists()
+        sleep_time = time.time() - start
+        print(f"Time taken: {sleep_time:.3f}s")
+        
+        # Method 2: Smart wait
+        print("\nMethod 2: Smart Wait")
+        file2 = mountpoint / "smart_test.txt"
+        start = time.time()
+        file2.write_text("content")
+        assert wait_helper.wait_for_file_visible(file2)
+        smart_time = time.time() - start
+        print(f"Time taken: {smart_time:.3f}s")
+        
+        # Summary
+        print(f"\nImprovement: {sleep_time - smart_time:.3f}s saved ({((sleep_time - smart_time) / sleep_time * 100):.1f}% faster)")
+        print(f"Smart wait is {sleep_time / smart_time:.1f}x faster than sleep")
+        
+    def test_operation_patterns(self, mounted_fs_with_trace):
+        """Analyze common operation patterns."""
+        process, mountpoint, branches, trace_monitor = mounted_fs_with_trace
+        wait_helper = SimpleWaitHelper(trace_monitor)
+        
+        print("\n=== Common Operation Patterns ===")
+        
+        # Pattern 1: Write and read
+        print("\nPattern 1: Write and Read")
+        file_path = mountpoint / "pattern1.txt"
+        start = time.time()
+        
+        file_path.write_text("test data")
+        assert wait_helper.wait_for_file_visible(file_path)
+        content = file_path.read_text()
+        assert content == "test data"
+        
+        pattern1_time = time.time() - start
+        print(f"Write-wait-read took: {pattern1_time:.3f}s")
+        
+        # Pattern 2: Create, modify, delete
+        print("\nPattern 2: Create, Modify, Delete")
+        file_path = mountpoint / "pattern2.txt"
+        start = time.time()
+        
+        file_path.write_text("initial")
+        assert wait_helper.wait_for_file_visible(file_path)
+        
+        file_path.write_text("modified")
+        assert wait_helper.wait_for_write_complete(file_path)
+        
+        file_path.unlink()
+        assert wait_helper.wait_for_deletion(file_path)
+        
+        pattern2_time = time.time() - start
+        print(f"Create-modify-delete took: {pattern2_time:.3f}s")
+        print(f"Traditional approach would use: 1.5s (3 x 0.5s sleeps)")
+        
+        # Show trace log patterns if available
+        if trace_monitor:
+            print("\n--- Recent FUSE Operations ---")
+            recent_logs = trace_monitor.get_recent_logs(20)
+            for log in recent_logs[-10:]:  # Last 10 operations
+                if any(op in log for op in ['create', 'write', 'unlink', 'lookup']):
+                    print(f"  {log.strip()}")

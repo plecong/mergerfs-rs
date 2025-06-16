@@ -23,12 +23,15 @@ impl FileManager {
     }
 
     pub fn create_file(&self, path: &Path, content: &[u8]) -> Result<(), PolicyError> {
+        let _span = tracing::info_span!("file_ops::create_file", path = ?path, content_size = content.len()).entered();
+        
         // Select branch for new file using create policy
+        tracing::debug!("Selecting branch for new file using create policy");
         let branch = self.create_policy.select_branch(&self.branches, path)?;
         let full_path = branch.full_path(path);
         
-        tracing::info!("Creating new file {:?} in branch {:?}", path, branch.path);
-        tracing::info!("Full path will be: {:?}", full_path);
+        tracing::info!("Selected branch {:?} for creating file {:?}", branch.path, path);
+        tracing::debug!("Full path will be: {:?}", full_path);
         
         // Create parent directories if needed
         if let Some(parent) = full_path.parent() {
@@ -39,7 +42,7 @@ impl FileManager {
         file.write_all(content)?;
         file.sync_all()?; // Ensure data is written to disk
         
-        tracing::info!("File created successfully at {:?}", full_path);
+        tracing::info!("File created successfully at {:?} with {} bytes", full_path, content.len());
         Ok(())
     }
     

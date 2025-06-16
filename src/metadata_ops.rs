@@ -20,7 +20,7 @@ impl MetadataManager {
 
     /// Change file permissions on all applicable branches
     pub fn chmod(&self, path: &Path, mode: u32) -> Result<(), PolicyError> {
-        let _span = tracing::debug_span!("metadata::chmod", path = ?path, mode = mode).entered();
+        let _span = tracing::info_span!("metadata::chmod", path = ?path, mode = %format!("{:o}", mode)).entered();
         
         let target_branches = self.action_policy.select_branches(&self.branches, path)?;
         tracing::debug!("Selected {} branches for chmod", target_branches.len());
@@ -51,7 +51,11 @@ impl MetadataManager {
 
     /// Change file ownership on all applicable branches
     pub fn chown(&self, path: &Path, uid: u32, gid: u32) -> Result<(), PolicyError> {
+        let _span = tracing::info_span!("metadata::chown", path = ?path, uid, gid).entered();
+        
+        tracing::debug!("Selecting branches for chown using action policy");
         let target_branches = self.action_policy.select_branches(&self.branches, path)?;
+        tracing::debug!("Selected {} branches for chown", target_branches.len());
         let mut last_error = None;
         let mut success_count = 0;
 
