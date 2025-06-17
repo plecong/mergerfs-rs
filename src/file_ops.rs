@@ -35,9 +35,35 @@ impl FileManager {
         tracing::info!("Selected branch {:?} for creating file {:?}", branch.path, path);
         tracing::debug!("Full path will be: {:?}", full_path);
         
-        // Create parent directories if needed
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        // If using a path-preserving policy, clone directory structure from template branch
+        if self.create_policy.is_path_preserving() {
+            let parent_path = path.parent().unwrap_or_else(|| Path::new("/"));
+            let template_branch = self.find_first_branch(parent_path).ok();
+            
+            if let Some(ref template) = template_branch {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        use crate::fs_utils;
+                        if let Err(e) = fs_utils::clone_path(&template.path, &branch.path, parent) {
+                            tracing::warn!("Failed to clone parent path structure: {:?}", e);
+                            // Fall back to simple directory creation
+                            if let Some(parent_dir) = full_path.parent() {
+                                std::fs::create_dir_all(parent_dir)?;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No template found, just create parent directories
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+        } else {
+            // Non-path-preserving policy, just create parent directories
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
         
         let mut file = File::create(&full_path)?;
@@ -130,6 +156,27 @@ impl FileManager {
         let branch = self.create_policy.select_branch(&self.branches, path)?;
         let full_path = branch.full_path(path);
         
+        tracing::info!("Creating directory {:?} in branch {:?}", path, branch.path);
+        
+        // If using a path-preserving policy, clone directory structure from template branch
+        if self.create_policy.is_path_preserving() {
+            let parent_path = path.parent().unwrap_or_else(|| Path::new("/"));
+            let template_branch = self.find_first_branch(parent_path).ok();
+            
+            if let Some(ref template) = template_branch {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        use crate::fs_utils;
+                        // Clone the parent path structure, then create the final directory
+                        if let Err(e) = fs_utils::clone_path(&template.path, &branch.path, parent) {
+                            tracing::warn!("Failed to clone parent path structure: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Create the directory (create_dir_all handles if it already exists)
         std::fs::create_dir_all(full_path)?;
         Ok(())
     }
@@ -796,5 +843,207 @@ mod tests {
             Err(e) => panic!("Expected ReadOnlyFilesystem error, got: {:?}", e),
             _ => panic!("Expected error"),
         }
+    }
+}
+#[cfg(test)]
+mod path_preservation_tests {
+    use super::*;
+    use crate::branch::{Branch, BranchMode};
+    use crate::file_ops::FileManager;
+    use crate::policy::{ExistingPathFirstFoundCreatePolicy, FirstFoundCreatePolicy};
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn create_test_file_manager_with_policy(
+        branches: Vec<Arc<Branch>>,
+        policy: Box<dyn crate::policy::traits::CreatePolicy>,
+    ) -> FileManager {
+        FileManager::new(branches, policy)
+    }
+
+    #[test]
+    fn test_path_preserving_file_creation() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        // Create parent directory structure in first branch only
+        let parent_dir = temp_dir1.path().join("path/to/parent");
+        fs::create_dir_all(&parent_dir).unwrap();
+        
+        // Set some metadata on the parent directory to verify it gets cloned
+        fs::write(parent_dir.join(".metadata"), b"test").unwrap();
+        
+        let branches = vec![
+            Arc::new(Branch::new(temp_dir1.path().to_path_buf(), BranchMode::ReadWrite)),
+            Arc::new(Branch::new(temp_dir2.path().to_path_buf(), BranchMode::ReadWrite)),
+        ];
+        
+        // Test with path-preserving policy (epff)
+        let manager = create_test_file_manager_with_policy(
+            branches.clone(),
+            Box::new(ExistingPathFirstFoundCreatePolicy::new()),
+        );
+        
+        // Create a file - should be placed in branch 2 (first branch with parent)
+        let result = manager.create_file(Path::new("/path/to/parent/file.txt"), b"content");
+        assert!(result.is_ok());
+        
+        // Verify file was created in branch 1 (which has the parent)
+        assert!(temp_dir1.path().join("path/to/parent/file.txt").exists());
+        assert!(!temp_dir2.path().join("path/to/parent/file.txt").exists());
+    }
+
+    #[test]
+    fn test_non_path_preserving_file_creation() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        // Create parent directory structure in second branch only
+        let parent_dir = temp_dir2.path().join("path/to/parent");
+        fs::create_dir_all(&parent_dir).unwrap();
+        
+        let branches = vec![
+            Arc::new(Branch::new(temp_dir1.path().to_path_buf(), BranchMode::ReadWrite)),
+            Arc::new(Branch::new(temp_dir2.path().to_path_buf(), BranchMode::ReadWrite)),
+        ];
+        
+        // Test with non-path-preserving policy (ff)
+        let manager = create_test_file_manager_with_policy(
+            branches.clone(),
+            Box::new(FirstFoundCreatePolicy::new()),
+        );
+        
+        // Create a file - should be placed in branch 1 (first found)
+        let result = manager.create_file(Path::new("/path/to/parent/file.txt"), b"content");
+        assert!(result.is_ok());
+        
+        // Verify file was created in branch 1 (first found), not branch 2
+        assert!(temp_dir1.path().join("path/to/parent/file.txt").exists());
+        assert!(!temp_dir2.path().join("path/to/parent/file.txt").exists());
+    }
+
+    #[test]
+    fn test_path_preservation_clones_directory_metadata() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        // Create parent directory with specific permissions
+        let parent_path = temp_dir1.path().join("parent");
+        fs::create_dir(&parent_path).unwrap();
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&parent_path, permissions).unwrap();
+        }
+        
+        let branches = vec![
+            Arc::new(Branch::new(temp_dir1.path().to_path_buf(), BranchMode::ReadWrite)),
+            Arc::new(Branch::new(temp_dir2.path().to_path_buf(), BranchMode::ReadWrite)),
+        ];
+        
+        // Test with path-preserving policy
+        let manager = create_test_file_manager_with_policy(
+            branches.clone(),
+            Box::new(ExistingPathFirstFoundCreatePolicy::new()),
+        );
+        
+        // Create file - this should trigger directory cloning
+        let result = manager.create_file(Path::new("/parent/file.txt"), b"content");
+        assert!(result.is_ok());
+        
+        // Parent should exist on branch 1 where file was created
+        assert!(temp_dir1.path().join("parent").exists());
+        assert!(temp_dir1.path().join("parent/file.txt").exists());
+    }
+
+    #[test]
+    fn test_path_preserving_directory_creation() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        // Create parent directory structure in first branch only
+        let parent_dir = temp_dir1.path().join("path/to");
+        fs::create_dir_all(&parent_dir).unwrap();
+        
+        let branches = vec![
+            Arc::new(Branch::new(temp_dir1.path().to_path_buf(), BranchMode::ReadWrite)),
+            Arc::new(Branch::new(temp_dir2.path().to_path_buf(), BranchMode::ReadWrite)),
+        ];
+        
+        // Test with path-preserving policy
+        let manager = create_test_file_manager_with_policy(
+            branches.clone(),
+            Box::new(ExistingPathFirstFoundCreatePolicy::new()),
+        );
+        
+        // Create a directory - should be placed in branch 1 (has parent)
+        let result = manager.create_directory(Path::new("/path/to/newdir"));
+        assert!(result.is_ok());
+        
+        // Verify directory was created in branch 1
+        assert!(temp_dir1.path().join("path/to/newdir").exists());
+        assert!(!temp_dir2.path().join("path/to/newdir").exists());
+    }
+
+    #[test]
+    fn test_path_preservation_no_parent_fails() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        // Don't create parent directory in any branch
+        
+        let branches = vec![
+            Arc::new(Branch::new(temp_dir1.path().to_path_buf(), BranchMode::ReadWrite)),
+            Arc::new(Branch::new(temp_dir2.path().to_path_buf(), BranchMode::ReadWrite)),
+        ];
+        
+        // Test with path-preserving policy
+        let manager = create_test_file_manager_with_policy(
+            branches.clone(),
+            Box::new(ExistingPathFirstFoundCreatePolicy::new()),
+        );
+        
+        // Try to create a file - should fail (no parent exists)
+        let result = manager.create_file(Path::new("/nonexistent/parent/file.txt"), b"content");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_path_preservation_with_deep_hierarchy() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        // Create deep directory structure in first branch
+        let deep_path = temp_dir1.path().join("a/b/c/d/e");
+        fs::create_dir_all(&deep_path).unwrap();
+        
+        // Add files at various levels
+        fs::write(temp_dir1.path().join("a/.marker"), b"level1").unwrap();
+        fs::write(temp_dir1.path().join("a/b/c/.marker"), b"level3").unwrap();
+        
+        let branches = vec![
+            Arc::new(Branch::new(temp_dir1.path().to_path_buf(), BranchMode::ReadWrite)),
+            Arc::new(Branch::new(temp_dir2.path().to_path_buf(), BranchMode::ReadWrite)),
+        ];
+        
+        // Test with path-preserving policy
+        let manager = create_test_file_manager_with_policy(
+            branches.clone(),
+            Box::new(ExistingPathFirstFoundCreatePolicy::new()),
+        );
+        
+        // Create file deep in hierarchy
+        let result = manager.create_file(Path::new("/a/b/c/d/e/file.txt"), b"deep content");
+        assert!(result.is_ok());
+        
+        // Verify file was created in branch 1
+        assert!(temp_dir1.path().join("a/b/c/d/e/file.txt").exists());
+        
+        // Directory structure should be preserved
+        assert!(temp_dir1.path().join("a/b/c/d/e").is_dir());
     }
 }

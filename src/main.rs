@@ -43,6 +43,7 @@ use policy::{
         LeastFreeSpaceCreatePolicy,
         LeastUsedSpaceCreatePolicy, 
         RandomCreatePolicy, 
+        ExistingPathFirstFoundCreatePolicy,
         ExistingPathMostFreeSpaceCreatePolicy,
         ExistingPathLeastFreeSpaceCreatePolicy,
         ProportionalFillRandomDistributionCreatePolicy
@@ -156,6 +157,7 @@ fn main() {
         "lfs" => ("LeastFreeSpace", Box::new(LeastFreeSpaceCreatePolicy::new())),
         "lus" => ("LeastUsedSpace", Box::new(LeastUsedSpaceCreatePolicy::new())),
         "rand" => ("Random", Box::new(RandomCreatePolicy::new())),
+        "epff" => ("ExistingPathFirstFound", Box::new(ExistingPathFirstFoundCreatePolicy::new())),
         "epmfs" => ("ExistingPathMostFreeSpace", Box::new(ExistingPathMostFreeSpaceCreatePolicy::new())),
         "eplfs" => ("ExistingPathLeastFreeSpace", Box::new(ExistingPathLeastFreeSpaceCreatePolicy::new())),
         "pfrd" => ("ProportionalFillRandomDistribution", Box::new(ProportionalFillRandomDistributionCreatePolicy::new())),

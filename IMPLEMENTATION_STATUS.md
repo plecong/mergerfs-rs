@@ -57,15 +57,17 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `opendir` - Open directory handle
 - [x] `releasedir` - Release directory handle
 
-#### Policies (10/36)
-**Create Policies (7/16)**:
+#### Policies (11/36)
+**Create Policies (9/16)**:
 - [x] `ff` (FirstFound) - First writable branch
 - [x] `mfs` (MostFreeSpace) - Branch with most free space
 - [x] `lfs` (LeastFreeSpace) - Branch with least free space
 - [x] `lus` (LeastUsedSpace) - Branch with least used space
 - [x] `rand` (Random) - Random branch selection
+- [x] `epff` (ExistingPathFirstFound) - First branch where parent exists
 - [x] `epmfs` (ExistingPathMostFreeSpace) - Existing path with most free space
 - [x] `eplfs` (ExistingPathLeastFreeSpace) - Existing path with least free space
+- [x] `pfrd` (ProportionalFillRandomDistribution) - Random weighted by free space
 
 **Action Policies (3/4)**:
 - [x] `all` - Apply to all branches
@@ -89,10 +91,6 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 #### FUSE Operations
 - [ ] `fsyncdir` - Sync directory (LOW)
 
-#### Policies
-**Create Policies**:
-- [x] `pfrd` (ProportionalFillRandomDistribution) - Random weighted by free space
-
 
 **Action Policies**:
 - [ ] `erofs` - Error read-only filesystem (LOW)
@@ -101,7 +99,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Runtime policy configuration via xattr on control file (/.mergerfs)
 - [x] Search policy integration into FUSE operations (basic file search)
 - [x] moveonenospc - Move files when out of space (COMPLETED)
-- [ ] Path preservation for "existing path" policies
+- [x] Path preservation for "existing path" policies (epff implemented)
 - [ ] Direct I/O support
 
 ### ❌ Not Implemented
@@ -135,7 +133,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ### Phase 2: Enhanced Functionality
 1. ✅ **moveonenospc**: Automatic file migration on ENOSPC (COMPLETED)
-2. **Path preservation**: Keep related files together
+2. ✅ **Path preservation**: Keep related files together (epff COMPLETED)
 3. **Additional policies**: lus, newest (pfrd COMPLETED)
 4. ✅ **Directory handles**: Proper opendir/releasedir (COMPLETED)
 5. ✅ **Access checks**: Proper permission validation (COMPLETED)
@@ -243,11 +241,11 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Implement path preservation for remaining "existing path" policies
-2. Add fallocate support for preallocation
-3. Implement fsyncdir for directory synchronization
-4. Add direct I/O support
-5. Implement remaining create policies (eplfs variants, shared path policies)
+1. Add fallocate support for preallocation
+2. Implement fsyncdir for directory synchronization
+3. Add direct I/O support
+4. Implement remaining existing path create policies (eprand, eplus, eppfrd)
+5. Implement most shared path policies (msp* variants)
 
 ---
 
