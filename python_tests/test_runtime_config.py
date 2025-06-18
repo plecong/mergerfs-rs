@@ -76,37 +76,37 @@ class TestRuntimeConfig:
         policy = xattr.getxattr(str(control_file), b'user.mergerfs.func.create')
         assert policy.decode('utf-8') in ['ff', 'mfs', 'lfs', 'rand']
         
-        # Get boolean options
+        # Get moveonenospc option (policy name, not boolean)
         moveonenospc = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
-        assert moveonenospc.decode('utf-8') in ['true', 'false']
+        # Should be a policy name (e.g., 'pfrd', 'mfs', 'ff', etc.) or 'false'
+        valid_values = ['false', 'ff', 'mfs', 'lfs', 'lus', 'rand', 'pfrd', 'epff', 'epmfs', 'eplfs']
+        assert moveonenospc.decode('utf-8') in valid_values
     
-    def test_set_boolean_configuration(self, mounted_fs):
-        """Test setting boolean configuration options."""
+    def test_set_moveonenospc_configuration(self, mounted_fs):
+        """Test setting moveonenospc configuration option."""
         process, mountpoint, branches = mounted_fs
         control_file = mountpoint / ".mergerfs"
         
-        # Get initial value
-        initial = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
-        initial_bool = initial.decode('utf-8') == 'true'
+        # Test setting different policy values
+        test_policies = [b'false', b'mfs', b'ff', b'pfrd', b'lfs']
         
-        # Toggle the value
-        new_value = b'false' if initial_bool else b'true'
-        xattr.setxattr(str(control_file), b'user.mergerfs.moveonenospc', new_value)
+        for policy in test_policies:
+            # Set the policy
+            xattr.setxattr(str(control_file), b'user.mergerfs.moveonenospc', policy)
+            
+            # Verify it changed
+            current = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
+            assert current == policy
         
-        # Verify it changed
-        current = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
-        assert current == new_value
+        # Test that 'false' disables it
+        xattr.setxattr(str(control_file), b'user.mergerfs.moveonenospc', b'false')
+        result = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
+        assert result == b'false'
         
-        # Test various boolean formats
-        for true_value in [b'true', b'1', b'yes', b'on']:
-            xattr.setxattr(str(control_file), b'user.mergerfs.moveonenospc', true_value)
-            result = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
-            assert result == b'true'
-        
-        for false_value in [b'false', b'0', b'no', b'off']:
-            xattr.setxattr(str(control_file), b'user.mergerfs.moveonenospc', false_value)
-            result = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
-            assert result == b'false'
+        # Test that policy names enable it with that policy
+        xattr.setxattr(str(control_file), b'user.mergerfs.moveonenospc', b'mfs')
+        result = xattr.getxattr(str(control_file), b'user.mergerfs.moveonenospc')
+        assert result == b'mfs'
     
     def test_set_policy_configuration(self, mounted_fs):
         """Test setting policy configuration options."""

@@ -13,10 +13,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 24 of 40+ implemented (60%)
+- **FUSE Operations**: 25 of 40+ implemented (62.5%)
 - **Policies**: 11 of 36 implemented (31%)
 - **Special Features**: 5 of 10+ implemented (50%)
-- **Test Coverage**: 186 tests passing (171 Rust + 15 Python)
+- **Test Coverage**: 194 tests passing (174 Rust + 20 Python)
 
 ## Implementation Status by Component
 
@@ -31,7 +31,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Permission checking utilities for access control
 - [x] Comprehensive tracing/logging infrastructure for all FUSE operations
 
-#### FUSE Operations (24/40+)
+#### FUSE Operations (25/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -56,6 +56,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `mknod` - Create special files (FIFOs, devices, sockets)
 - [x] `opendir` - Open directory handle
 - [x] `releasedir` - Release directory handle
+- [x] `fallocate` - Preallocate file space (basic implementation)
 
 #### Policies (11/36)
 **Create Policies (9/16)**:
@@ -104,9 +105,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ### ❌ Not Implemented
 
-#### FUSE Operations (18+)
+#### FUSE Operations (17+)
 - Directory sync: `fsyncdir`
-- Advanced I/O: `poll`, `fallocate`, `ftruncate`, `copy_file_range`
+- Advanced I/O: `poll`, `ftruncate`, `copy_file_range`
 - Locking: `lock`, `flock`
 - Time operations: separate `utimens` operation
 - Advanced readdir: `readdir_plus`
@@ -232,6 +233,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Default policy is PFRD (Proportional Fill Random Distribution)
 - See `docs/MOVEONENOSPC_DESIGN.md` for implementation details
 
+### Fallocate Operation
+- Implements file preallocation for improved performance
+- Supports basic allocation (mode=0) and KEEP_SIZE flag
+- Cross-platform implementation with fallback for non-Linux systems
+- Simplified implementation using standard file operations
+- See `docs/FALLOCATE_DESIGN.md` for implementation details
+
 ## Resources
 
 - **Documentation**: See `docs/` directory for detailed design docs
@@ -241,11 +249,11 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Add fallocate support for preallocation
-2. Implement fsyncdir for directory synchronization
-3. Add direct I/O support
-4. Implement remaining existing path create policies (eprand, eplus, eppfrd)
-5. Implement most shared path policies (msp* variants)
+1. Implement fsyncdir for directory synchronization
+2. Add direct I/O support
+3. Implement remaining existing path create policies (eprand, eplus, eppfrd)
+4. Implement most shared path policies (msp* variants)
+5. Add ftruncate operation support
 
 ---
 
