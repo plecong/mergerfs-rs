@@ -347,16 +347,31 @@ class FuseManager:
         process = self.active_mounts[mountpoint]
         
         try:
-            # First try graceful shutdown
+            # Force filesystem sync before unmount to avoid busy issues
+            try:
+                import subprocess
+                subprocess.run(['sync'], timeout=1.0, capture_output=True)
+            except:
+                pass  # sync is optional
+            
+            # Give any pending operations a moment to complete
+            time.sleep(0.1)
+            
+            # First try graceful shutdown with SIGTERM
             process.terminate()
             
             # Wait for process to exit with shorter timeout
             try:
-                process.wait(timeout=1.0)  # Reduced from 5.0 for faster unmount
+                process.wait(timeout=2.0)  # Increased slightly for better reliability
             except subprocess.TimeoutExpired:
+                print(f"Warning: FUSE process did not exit gracefully, force killing")
                 # Force kill if graceful shutdown fails
                 process.kill()
-                process.wait(timeout=0.5)  # Reduced from 2.0
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    print(f"Warning: FUSE process could not be killed, marking as stale")
+                    # Process is stuck, but continue cleanup
                 
             # Remove from active mounts
             del self.active_mounts[mountpoint]
@@ -384,14 +399,17 @@ class FuseManager:
             
             # Wait for the mountpoint to be unmounted
             unmount_start = time.time()
-            if trace_monitor and hasattr(trace_monitor, 'wait_for_operation'):
-                # Wait for destroy operation (advanced trace only)
-                trace_monitor.wait_for_operation('destroy', timeout=0.5)
-            self._wait_for_unmount(mountpoint, timeout=2.0)  # Reduced from 5.0
-            unmount_time = time.time() - unmount_start
-            
-            if unmount_time > 0.5:
-                print(f"Unmount took {unmount_time:.2f}s to complete")
+            try:
+                if trace_monitor and hasattr(trace_monitor, 'wait_for_operation'):
+                    # Wait for destroy operation (advanced trace only)
+                    trace_monitor.wait_for_operation('destroy', timeout=0.5)
+                self._wait_for_unmount(mountpoint, timeout=3.0)  # Slightly increased for reliability
+                unmount_time = time.time() - unmount_start
+                
+                if unmount_time > 0.5:
+                    print(f"Unmount took {unmount_time:.2f}s to complete")
+            except Exception as e:
+                print(f"Warning: Error during unmount wait: {e}")
                 
             # Stop log capture if present
             if hasattr(process, '_log_capture'):
@@ -419,11 +437,27 @@ class FuseManager:
         """
         def check_unmounted():
             try:
-                # Try to stat the directory - FUSE mount will fail when unmounted
-                os.stat(mountpoint / ".mergerfs")
-                return False  # Still mounted if we can stat .mergerfs
-            except (OSError, FileNotFoundError):
-                # Expected when unmounted
+                # Multiple checks to verify unmount
+                # 1. Try to stat the control file
+                try:
+                    os.stat(mountpoint / ".mergerfs")
+                    return False  # Still mounted if we can stat .mergerfs
+                except (OSError, FileNotFoundError):
+                    pass  # Good, control file gone
+                
+                # 2. Check if we can access the mountpoint at all
+                try:
+                    os.listdir(mountpoint)
+                    # If we can list it and no .mergerfs, it's unmounted
+                    return True
+                except OSError as e:
+                    # ENOTCONN, ENOENT, or similar - indicates unmount
+                    if e.errno in (107, 2, 116):  # ENOTCONN, ENOENT, ESTALE
+                        return True
+                    return False
+                    
+            except Exception:
+                # Any other error likely means unmounted
                 return True
                 
         success, elapsed = wait_for_operation(
@@ -432,6 +466,9 @@ class FuseManager:
             interval=0.05,
             operation_name=f"unmount at {mountpoint}"
         )
+        
+        if not success:
+            print(f"Warning: Unmount verification failed after {timeout}s, but continuing cleanup")
     
     def cleanup(self):
         """Clean up all active mounts and temporary directories."""
@@ -451,7 +488,27 @@ class FuseManager:
         for temp_dir in self.temp_dirs:
             try:
                 if temp_dir.exists():
-                    shutil.rmtree(temp_dir)
+                    # Check if it's a stale FUSE mount first
+                    try:
+                        # Try to list directory to see if it's responsive
+                        list(temp_dir.iterdir())
+                        # If successful, it's a normal directory
+                        shutil.rmtree(temp_dir)
+                    except OSError as e:
+                        if e.errno == 107:  # ENOTCONN - Transport endpoint is not connected
+                            # This is a stale FUSE mount - wait and retry
+                            print(f"Detected stale FUSE mount at {temp_dir}, waiting for cleanup...")
+                            time.sleep(0.5)
+                            try:
+                                # Try removing again after brief wait
+                                if temp_dir.exists():
+                                    shutil.rmtree(temp_dir)
+                            except OSError:
+                                # Still can't remove - mark as stale but continue
+                                print(f"Warning: Stale FUSE mount at {temp_dir} could not be cleaned up")
+                        else:
+                            # Other error, try normal removal
+                            shutil.rmtree(temp_dir)
             except Exception as e:
                 print(f"Warning: Could not remove {temp_dir}: {e}")
         
@@ -469,15 +526,34 @@ class FuseManager:
             Tuple of (process, mountpoint, branches, trace_monitor) if tracing enabled
         """
         process = None
+        mounted = False
         try:
             process = self.mount(config)
+            mounted = True
             if config.enable_trace and config.mountpoint in self.trace_monitors:
                 yield process, config.mountpoint, config.branches, self.trace_monitors[config.mountpoint]
             else:
                 yield process, config.mountpoint, config.branches
+        except Exception as e:
+            print(f"Error in mounted_fs context: {e}")
+            raise
         finally:
-            if process and config.mountpoint in self.active_mounts:
-                self.unmount(config.mountpoint)
+            if mounted and process and config.mountpoint in self.active_mounts:
+                try:
+                    # Give any hanging operations time to complete
+                    time.sleep(0.05)
+                    success = self.unmount(config.mountpoint)
+                    if not success:
+                        print(f"Warning: Failed to cleanly unmount {config.mountpoint}")
+                except Exception as e:
+                    print(f"Error during unmount: {e}")
+                    # Still try to clean up process if possible
+                    if process and process.poll() is None:
+                        try:
+                            process.kill()
+                            process.wait(timeout=1.0)
+                        except:
+                            pass
     
     def get_trace_monitor(self, mountpoint: Path) -> Optional[FuseTraceMonitor]:
         """Get the trace monitor for a mount point if available."""

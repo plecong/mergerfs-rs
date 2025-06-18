@@ -21,9 +21,9 @@ except ImportError:
 import os
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def fuse_manager() -> Generator[FuseManager, None, None]:
-    """Session-scoped FUSE manager that handles cleanup."""
+    """Function-scoped FUSE manager that handles cleanup."""
     # Enable trace monitoring if requested via environment
     enable_trace = os.getenv('FUSE_TRACE', '').lower() in ('1', 'true', 'yes')
     manager = FuseManager(enable_trace=enable_trace)
