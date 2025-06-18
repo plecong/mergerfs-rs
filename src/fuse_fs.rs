@@ -62,6 +62,7 @@ pub struct MergerFS {
 pub struct InodeData {
     pub path: String,
     pub attr: FileAttr,
+    pub content_lock: Arc<parking_lot::RwLock<()>>, // Guards file content operations
 }
 
 impl MergerFS {
@@ -117,6 +118,7 @@ impl MergerFS {
         inodes.insert(1, InodeData {
             path: "/".to_string(),
             attr: root_attr,
+            content_lock: Arc::new(parking_lot::RwLock::new(())),
         });
         
         let mut path_cache = HashMap::new();
@@ -255,7 +257,11 @@ impl MergerFS {
     
     fn insert_inode(&self, ino: u64, path: String, attr: FileAttr) {
         // Insert into inode map first
-        self.inodes.write().insert(ino, InodeData { path: path.clone(), attr });
+        self.inodes.write().insert(ino, InodeData { 
+            path: path.clone(), 
+            attr,
+            content_lock: Arc::new(parking_lot::RwLock::new(())),
+        });
         // Then update cache separately to avoid holding multiple locks
         self.path_cache.write().insert(path, ino);
     }
@@ -451,6 +457,18 @@ impl Filesystem for MergerFS {
     ) {
         let _span = tracing::info_span!("fuse::read", ino, fh, offset, size).entered();
         tracing::info!("Starting read operation");
+
+        // Get the content lock for this inode
+        let content_lock = match self.get_inode_data(ino) {
+            Some(data) => data.content_lock.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Acquire read lock to ensure no concurrent truncate/write
+        let _content_guard = content_lock.read();
 
         // Get the path from file handle or inode
         let path_info = self.file_handle_manager.get_handle(fh)
@@ -745,6 +763,18 @@ impl Filesystem for MergerFS {
     ) {
         let _span = tracing::info_span!("fuse::write", ino, fh, offset, len = data.len(), write_flags = %format!("0x{:x}", write_flags), flags = %format!("0x{:x}", flags)).entered();
         tracing::debug!("Starting write operation");
+
+        // Get the content lock for this inode
+        let content_lock = match self.get_inode_data(ino) {
+            Some(data) => data.content_lock.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Acquire write lock to ensure exclusive access during write
+        let _content_guard = content_lock.write();
 
         // Get file path and branch info without holding locks during I/O
         let (path_buf, branch_idx) = {
@@ -1142,6 +1172,13 @@ impl Filesystem for MergerFS {
 
         let path = Path::new(&data.path);
         
+        // Get content lock if we're changing size (truncating)
+        let _content_guard = if size.is_some() {
+            Some(data.content_lock.write())
+        } else {
+            None
+        };
+        
         // Handle mode changes
         if let Some(mode) = mode {
             if let Err(e) = self.metadata_manager.chmod(path, mode) {
@@ -1165,7 +1202,7 @@ impl Filesystem for MergerFS {
             }
         }
         
-        // Handle size changes (truncate)
+        // Handle size changes (truncate) - lock is held if size.is_some()
         if let Some(size) = size {
             if let Err(e) = self.file_manager.truncate_file(path, size) {
                 error!("truncate failed for {:?}: {:?}", data.path, e);

@@ -96,7 +96,7 @@ class TestConcurrentFileOperations:
                 assert len(locations) == 1, f"File {filename} should be in exactly one branch"
                 assert locations[0] == 0, f"FirstFound policy should put file in branch 0"
     
-    @pytest.mark.skip(reason="Read operations hanging - needs further investigation")
+    @pytest.mark.skip(reason="Python test framework cleanup issues - operations work but cleanup hangs")
     def test_concurrent_read_write_operations(
         self,
         fuse_manager: FuseManager,
@@ -265,7 +265,7 @@ class TestConcurrentFileOperations:
 
 @pytest.mark.concurrent
 @pytest.mark.integration
-@pytest.mark.skip(reason="Directory operations with concurrent file creation still cause issues")
+@pytest.mark.skip(reason="Directory operations still hang - needs investigation")
 class TestConcurrentDirectoryOperations:
     """Test concurrent directory operations."""
     
