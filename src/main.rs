@@ -182,6 +182,8 @@ fn main() {
         fuser::MountOption::AutoUnmount,
     ];
     
+    // For Python tests, we need to use mount2 instead of spawn_mount2
+    // because the Python test harness expects the process to block
     match fuser::mount2(fs, &mountpoint, &options) {
         Ok(()) => {
             tracing::info!("Filesystem unmounted successfully");

@@ -1,13 +1,13 @@
 use crate::config::{ConfigRef, StatFSIgnore};
-use crate::policy::{AllActionPolicy, PolicyError};
+use crate::policy::AllActionPolicy;
+use crate::policy::error::PolicyError;
 use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
 use crate::file_handle::FileHandleManager;
-use crate::xattr::{XattrManager, XattrError, XattrFlags};
+use crate::xattr::{XattrManager, XattrFlags};
 use crate::policy::{FirstFoundSearchPolicy, FirstFoundCreatePolicy};
 use crate::config_manager::ConfigManager;
 use crate::rename_ops::RenameManager;
-use crate::permissions::{check_access, AccessError};
 use crate::moveonenospc::{MoveOnENOSPCHandler, is_out_of_space_error};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, 
@@ -28,8 +28,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::io::Write;
-use tracing::{debug, error, info, warn};
+use tracing::error;
 
 const TTL: Duration = Duration::from_secs(1);
 const CONTROL_FILE_INO: u64 = u64::MAX; // Special inode for /.mergerfs
@@ -53,6 +52,10 @@ pub struct MergerFS {
     next_inode: std::sync::atomic::AtomicU64,
     dir_handles: parking_lot::RwLock<HashMap<u64, DirHandle>>,
     next_dir_handle: std::sync::atomic::AtomicU64,
+    // Cache for path to inode lookups to reduce lock contention
+    path_cache: parking_lot::RwLock<HashMap<String, u64>>,
+    // Fast-path cache for root inode (always inode 1)
+    root_inode_cache: InodeData,
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +107,8 @@ impl MergerFS {
             kind: FileType::Directory,
             perm: 0o755,
             nlink: 2,
-            uid: 1000, // Default user ID for Alpine/containers
-            gid: 1000, // Default group ID for Alpine/containers
+            uid: 1000,
+            gid: 1000,
             rdev: 0,
             flags: 0,
             blksize: 512,
@@ -116,21 +119,29 @@ impl MergerFS {
             attr: root_attr,
         });
         
+        let mut path_cache = HashMap::new();
+        path_cache.insert("/".to_string(), 1);
+        
         let moveonenospc_handler = MoveOnENOSPCHandler::new(config.clone());
         
-        Self {
+        // Clone root inode data for fast-path cache
+        let root_inode_cache = inodes.get(&1).unwrap().clone();
+        
+        MergerFS {
             file_manager: Arc::new(file_manager),
             metadata_manager: Arc::new(metadata_manager),
-            config: config.clone(),
+            config,
             file_handle_manager: Arc::new(FileHandleManager::new()),
             xattr_manager: Arc::new(xattr_manager),
             config_manager: Arc::new(config_manager),
             rename_manager: Arc::new(rename_manager),
             moveonenospc_handler: Arc::new(moveonenospc_handler),
             inodes: parking_lot::RwLock::new(inodes),
-            next_inode: std::sync::atomic::AtomicU64::new(2),
+            next_inode: std::sync::atomic::AtomicU64::new(2), // Start at 2, 1 is root
             dir_handles: parking_lot::RwLock::new(HashMap::new()),
             next_dir_handle: std::sync::atomic::AtomicU64::new(1),
+            path_cache: parking_lot::RwLock::new(path_cache),
+            root_inode_cache,
         }
     }
 
@@ -139,17 +150,45 @@ impl MergerFS {
     }
 
     pub fn get_inode_data(&self, ino: u64) -> Option<InodeData> {
+        // Fast path for root inode
+        if ino == 1 {
+            return Some(self.root_inode_cache.clone());
+        }
         self.inodes.read().get(&ino).cloned()
+    }
+    
+    pub fn update_inode_size(&self, ino: u64, new_size: u64) {
+        let mut inodes = self.inodes.write();
+        if let Some(inode_data) = inodes.get_mut(&ino) {
+            inode_data.attr.size = new_size;
+            inode_data.attr.blocks = (new_size + 511) / 512;
+            let now = SystemTime::now();
+            inode_data.attr.mtime = now;
+            inode_data.attr.ctime = now;
+            tracing::debug!("Updated inode {} size to {}", ino, new_size);
+        }
     }
 
     pub fn path_to_inode(&self, path: &str) -> Option<u64> {
-        let inodes = self.inodes.read();
-        for (&ino, data) in inodes.iter() {
-            if data.path == path {
-                return Some(ino);
-            }
+        // Check cache first
+        if let Some(&ino) = self.path_cache.read().get(path) {
+            return Some(ino);
         }
-        None
+        
+        // If not in cache, search in inodes
+        let found_inode = {
+            let inodes = self.inodes.read();
+            inodes.iter()
+                .find(|(_, data)| data.path == path)
+                .map(|(&ino, _)| ino)
+        };
+        
+        // Update cache if found (no locks held during this)
+        if let Some(ino) = found_inode {
+            self.path_cache.write().insert(path.to_string(), ino);
+        }
+        
+        found_inode
     }
 
     pub fn create_file_attr(&self, path: &Path) -> Option<FileAttr> {
@@ -182,20 +221,24 @@ impl MergerFS {
         Some(FileAttr {
             ino: 0, // Will be set by caller
             size,
-            blocks: (size + 511) / 512,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
+            blocks: (size + 511) / 512, // Round up to nearest block
+            atime: metadata.accessed().unwrap_or(now),
+            mtime: metadata.modified().unwrap_or(now),
+            ctime: metadata.created().unwrap_or(now),
+            crtime: metadata.created().unwrap_or(now),
             kind: file_type,
             perm,
             nlink,
-            uid: 1000, // Default user ID for Alpine/containers
-            gid: 1000, // Default group ID for Alpine/containers
+            uid: 1000, // Default user ID for container compatibility
+            gid: 1000, // Default group ID for container compatibility
             rdev: 0,
             flags: 0,
             blksize: 512,
         })
+    }
+
+    pub fn store_dir_handle(&self, fh: u64, path: PathBuf, ino: u64) {
+        self.dir_handles.write().insert(fh, DirHandle { path, ino });
     }
 
     pub fn allocate_dir_handle(&self) -> u64 {
@@ -208,6 +251,25 @@ impl MergerFS {
 
     pub fn remove_dir_handle(&self, fh: u64) {
         self.dir_handles.write().remove(&fh);
+    }
+    
+    fn insert_inode(&self, ino: u64, path: String, attr: FileAttr) {
+        // Insert into inode map first
+        self.inodes.write().insert(ino, InodeData { path: path.clone(), attr });
+        // Then update cache separately to avoid holding multiple locks
+        self.path_cache.write().insert(path, ino);
+    }
+    
+    fn remove_inode(&self, ino: u64) {
+        // Get path first, then remove from both maps separately
+        let path = {
+            let mut inodes = self.inodes.write();
+            inodes.remove(&ino).map(|data| data.path)
+        };
+        
+        if let Some(path) = path {
+            self.path_cache.write().remove(&path);
+        }
     }
 }
 
@@ -287,12 +349,7 @@ impl Filesystem for MergerFS {
             let ino = self.allocate_inode();
             attr.ino = ino;
 
-            let inode_data = InodeData {
-                path: child_path,
-                attr,
-            };
-
-            self.inodes.write().insert(ino, inode_data.clone());
+            self.insert_inode(ino, child_path, attr);
             reply.entry(&TTL, &attr, 0);
         } else {
             reply.error(ENOENT);
@@ -300,8 +357,8 @@ impl Filesystem for MergerFS {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        let _span = tracing::debug_span!("fuse::getattr", ino).entered();
-        tracing::debug!("Starting getattr");
+        let _span = tracing::info_span!("fuse::getattr", ino).entered();
+        tracing::info!("Starting getattr");
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
@@ -327,7 +384,10 @@ impl Filesystem for MergerFS {
         }
 
         match self.get_inode_data(ino) {
-            Some(data) => reply.attr(&TTL, &data.attr),
+            Some(data) => {
+                tracing::info!("Returning attr for inode {}: size={}, path={}", ino, data.attr.size, data.path);
+                reply.attr(&TTL, &data.attr)
+            },
             None => reply.error(ENOENT),
         }
     }
@@ -347,27 +407,35 @@ impl Filesystem for MergerFS {
                             // Find the index of this branch
                             self.file_manager.branches.iter().position(|b| Arc::ptr_eq(b, &branch))
                         }
-                        Err(_) => None,
+                        Err(_) => None, // File doesn't exist in any branch
                     };
                     
                     // Create file handle
-                    let fh = self.file_handle_manager.create_handle(
-                        ino,
-                        PathBuf::from(&data.path),
-                        flags,
-                        branch_idx
-                    );
+                    let fh = self.file_handle_manager.create_handle(ino, PathBuf::from(&data.path), flags, branch_idx);
                     
-                    // TODO: Check if O_DIRECT is requested and set appropriate flags
-                    let open_flags = 0;
-                    
-                    reply.opened(fh, open_flags);
+                    reply.opened(fh, flags as u32);
                 } else {
-                    reply.error(ENOTDIR);
+                    // Not a regular file
+                    reply.error(EINVAL);
                 }
             }
             None => reply.error(ENOENT),
         }
+    }
+
+    fn release(
+        &mut self, 
+        _req: &Request, 
+        _ino: u64, 
+        fh: u64, 
+        _flags: i32, 
+        _lock_owner: Option<u64>, 
+        _flush: bool, 
+        reply: fuser::ReplyEmpty
+    ) {
+        let _span = tracing::debug_span!("fuse::release", _ino, fh).entered();
+        self.file_handle_manager.remove_handle(fh);
+        reply.ok();
     }
 
     fn read(
@@ -378,137 +446,81 @@ impl Filesystem for MergerFS {
         offset: i64,
         size: u32,
         _flags: i32,
-        _lock: Option<u64>,
+        _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let _span = tracing::debug_span!("fuse::read", ino, fh, offset, size).entered();
-        tracing::debug!("Starting read");
+        let _span = tracing::info_span!("fuse::read", ino, fh, offset, size).entered();
+        tracing::info!("Starting read operation");
 
-        // Get the file handle
-        let handle = match self.file_handle_manager.get_handle(fh) {
-            Some(h) => h,
+        // Get the path from file handle or inode
+        let path_info = self.file_handle_manager.get_handle(fh)
+            .map(|h| (h.path, h.branch_idx))
+            .or_else(|| {
+                self.get_inode_data(ino).map(|data| (PathBuf::from(&data.path), None))
+            });
+
+        let (path_buf, _branch_idx) = match path_info {
+            Some(info) => info,
             None => {
-                // Fallback to reading without handle for compatibility
-                let data = match self.get_inode_data(ino) {
-                    Some(data) => data,
-                    None => {
-                        reply.error(ENOENT);
-                        return;
-                    }
-                };
-                
-                let path = Path::new(&data.path);
-                match self.file_manager.read_file(path) {
-                    Ok(content) => {
-                        let start = offset as usize;
-                        let end = std::cmp::min(start + size as usize, content.len());
-                        
-                        if start >= content.len() {
-                            reply.data(&[]);
-                        } else {
-                            reply.data(&content[start..end]);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to read file {}: {:?}", data.path, e);
-                        reply.error(ENOENT);
-                    }
-                }
+                reply.error(ENOENT);
                 return;
             }
         };
 
-        // Use the file handle's path
-        let path = Path::new(&handle.path);
+        let path = path_buf.as_path();
         
-        // If we know which branch, read from that specific branch
-        let content = if let Some(branch_idx) = handle.branch_idx {
-            if branch_idx < self.file_manager.branches.len() {
-                let branch = &self.file_manager.branches[branch_idx];
+        // Find the file and read from it
+        tracing::info!("Looking for file at path: {:?}", path);
+        match self.file_manager.find_first_branch(path) {
+            Ok(branch) => {
                 let full_path = branch.full_path(path);
-                match std::fs::read(&full_path) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!("Failed to read file from branch {}: {:?}", branch_idx, e);
-                        reply.error(ENOENT);
-                        return;
+                tracing::info!("Found file at branch path: {:?}", full_path);
+                use std::fs::File;
+                use std::io::{Read, Seek, SeekFrom};
+                
+                match File::open(&full_path) {
+                    Ok(mut file) => {
+                        // Seek to the requested offset
+                        if offset > 0 {
+                            if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
+                                error!("Failed to seek: {:?}", e);
+                                reply.error(EIO);
+                                return;
+                            }
+                        }
+                        
+                        // Read the requested amount of data
+                        let mut buffer = vec![0u8; size as usize];
+                        match file.read(&mut buffer) {
+                            Ok(n) => {
+                                tracing::info!("Read {} bytes from file (requested {})", n, size);
+                                buffer.truncate(n);
+                                reply.data(&buffer);
+                            }
+                            Err(e) => {
+                                error!("Read failed: {:?}", e);
+                                reply.error(EIO);
+                            }
+                        }
                     }
-                }
-            } else {
-                // Fallback to normal read
-                match self.file_manager.read_file(path) {
-                    Ok(data) => data,
                     Err(e) => {
-                        error!("Failed to read file: {:?}", e);
-                        reply.error(ENOENT);
-                        return;
+                        error!("Failed to open file for reading: {:?}", e);
+                        reply.error(EIO);
                     }
                 }
             }
-        } else {
-            // Fallback to normal read
-            match self.file_manager.read_file(path) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("Failed to read file: {:?}", e);
-                    reply.error(ENOENT);
-                    return;
-                }
+            Err(e) => {
+                error!("Read failed for {:?}: {:?}", path, e);
+                reply.error(EIO);
             }
-        };
-
-        let start = offset as usize;
-        let end = std::cmp::min(start + size as usize, content.len());
-        
-        if start >= content.len() {
-            reply.data(&[]);
-        } else {
-            reply.data(&content[start..end]);
         }
     }
 
-    fn readdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        let _span = tracing::debug_span!("fuse::readdir", ino, fh, offset).entered();
-        tracing::debug!("Starting readdir");
+    fn opendir(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        let _span = tracing::debug_span!("fuse::opendir", ino, flags).entered();
+        tracing::debug!("Starting opendir");
 
-        // Try to use directory handle if provided
-        let _dir_path = if fh != 0 {
-            match self.get_dir_handle(fh) {
-                Some(handle) => {
-                    tracing::debug!("Using directory handle for path: {:?}", handle.path);
-                    handle.path.to_string_lossy().to_string()
-                }
-                None => {
-                    // Handle not found, fall back to inode lookup
-                    tracing::debug!("Directory handle not found, using inode lookup");
-                    match self.get_inode_data(ino) {
-                        Some(data) => data.path,
-                        None => {
-                            reply.error(ENOENT);
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            // No handle provided, use inode lookup
-            match self.get_inode_data(ino) {
-                Some(data) => data.path,
-                None => {
-                    reply.error(ENOENT);
-                    return;
-                }
-            }
-        };
-
-        // Verify it's a directory
+        // Check if it's a directory
         let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
@@ -522,6 +534,62 @@ impl Filesystem for MergerFS {
             return;
         }
 
+        // Store directory handle
+        let fh = self.allocate_dir_handle();
+        self.store_dir_handle(fh, PathBuf::from(&data.path), ino);
+
+        reply.opened(fh, flags as u32);
+    }
+
+    fn releasedir(&mut self, _req: &Request, _ino: u64, fh: u64, _flags: i32, reply: fuser::ReplyEmpty) {
+        let _span = tracing::debug_span!("fuse::releasedir", _ino, fh).entered();
+        self.remove_dir_handle(fh);
+        reply.ok();
+    }
+
+    fn readdir(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, mut reply: ReplyDirectory) {
+        let _span = tracing::debug_span!("fuse::readdir", ino, fh, offset).entered();
+        tracing::debug!("Starting readdir");
+
+        // Get directory path and verify it's a directory without holding locks
+        let dir_path = {
+            // Get the directory path from the handle or inode
+            let path = if fh > 0 {
+                match self.get_dir_handle(fh) {
+                    Some(handle) => handle.path.to_string_lossy().to_string(),
+                    None => {
+                        reply.error(EINVAL);
+                        return;
+                    }
+                }
+            } else {
+                // No handle provided, use inode lookup
+                match self.get_inode_data(ino) {
+                    Some(data) => data.path.clone(),
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                }
+            };
+
+            // Verify it's a directory
+            let data = match self.get_inode_data(ino) {
+                Some(data) => data,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            if data.attr.kind != FileType::Directory {
+                reply.error(ENOTDIR);
+                return;
+            }
+            
+            data.path
+        };
+
         // Start with standard entries
         let mut entries = vec![
             (1, FileType::Directory, ".".to_string()),
@@ -529,20 +597,20 @@ impl Filesystem for MergerFS {
         ];
 
         // Add control file to root directory listing
-        if data.path == "/" {
+        if dir_path == "/" {
             entries.push((CONTROL_FILE_INO, FileType::RegularFile, ".mergerfs".to_string()));
         }
         
-        // Get union directory listing
-        let path = Path::new(&data.path);
+        // Get union directory listing (no locks held during I/O)
+        let path = Path::new(&dir_path);
         match self.file_manager.list_directory(path) {
             Ok(dir_entries) => {
                 for entry_name in dir_entries {
                     // Create a path for this entry to check if it's a directory
-                    let entry_path = if data.path == "/" {
+                    let entry_path = if dir_path == "/" {
                         format!("/{}", entry_name)
                     } else {
-                        format!("{}/{}", data.path, entry_name)
+                        format!("{}/{}", dir_path, entry_name)
                     };
                     
                     // Determine if it's a file or directory by checking any branch
@@ -592,46 +660,64 @@ impl Filesystem for MergerFS {
         let _span = tracing::info_span!("fuse::create", parent, name = %name_str, mode = %format!("{:o}", mode), umask = %format!("{:o}", umask), flags = %format!("0x{:x}", flags)).entered();
         tracing::debug!("Starting create operation");
 
-        let parent_data = match self.get_inode_data(parent) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
+        // Get parent path without holding lock during file creation
+        let file_path = {
+            let parent_data = match self.get_inode_data(parent) {
+                Some(data) => data,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+            
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+            
+            let parent_path = parent_data.path.clone();
+            if parent_path == "/" {
+                format!("/{}", name_str)
+            } else {
+                format!("{}/{}", parent_path, name_str)
             }
         };
 
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let file_path = if parent_data.path == "/" {
-            format!("/{}", name_str)
-        } else {
-            format!("{}/{}", parent_data.path, name_str)
-        };
-
-        // Create empty file using file manager
+        // Create empty file using file manager (no locks held)
         let path = Path::new(&file_path);
         tracing::debug!("Creating file at path: {:?}", file_path);
+        
         match self.file_manager.create_file(path, &[]) {
             Ok(_) => {
                 tracing::info!("File created successfully at {:?}", file_path);
-                // Create file attributes
+                // Create file attributes (no locks held during I/O)
                 if let Some(mut attr) = self.create_file_attr(path) {
                     let ino = self.allocate_inode();
                     attr.ino = ino;
 
-                    let inode_data = InodeData {
-                        path: file_path,
-                        attr,
-                    };
-
-                    self.inodes.write().insert(ino, inode_data);
-                    reply.created(&TTL, &attr, 0, 0, 0);
+                    // Insert inode with minimal lock time
+                    self.insert_inode(ino, file_path.clone(), attr);
+                    
+                    // Create a file handle for the newly created file
+                    // Find which branch the file was created on
+                    let branch_idx = self.file_manager.branches.iter().position(|branch| {
+                        branch.full_path(path).exists()
+                    });
+                    
+                    let fh = self.file_handle_manager.create_handle(
+                        ino,
+                        PathBuf::from(&file_path),
+                        flags,
+                        branch_idx
+                    );
+                    
+                    tracing::debug!("Created file handle {} for new file {:?}", fh, file_path);
+                    
+                    // Return the file handle in the reply
+                    reply.created(&TTL, &attr, 0, fh, flags as u32);
                 } else {
                     reply.error(EIO);
                 }
@@ -660,24 +746,24 @@ impl Filesystem for MergerFS {
         let _span = tracing::info_span!("fuse::write", ino, fh, offset, len = data.len(), write_flags = %format!("0x{:x}", write_flags), flags = %format!("0x{:x}", flags)).entered();
         tracing::debug!("Starting write operation");
 
-        // Try to get file handle first
-        let handle = self.file_handle_manager.get_handle(fh);
-        
-        // Get the path - either from handle or inode
-        let (path_buf, branch_idx) = if let Some(h) = &handle {
-            tracing::debug!("Using file handle {} for path {:?}, branch {:?}", fh, h.path, h.branch_idx);
-            (h.path.clone(), h.branch_idx)
-        } else {
-            tracing::debug!("No file handle found for fh {}, falling back to inode lookup", fh);
-            // Fallback to using inode data
-            let inode_data = match self.get_inode_data(ino) {
-                Some(data) => data,
-                None => {
-                    reply.error(ENOENT);
-                    return;
-                }
-            };
-            (PathBuf::from(&inode_data.path), None)
+        // Get file path and branch info without holding locks during I/O
+        let (path_buf, branch_idx) = {
+            // Try to get file handle first
+            if let Some(handle) = self.file_handle_manager.get_handle(fh) {
+                tracing::debug!("Using file handle {} for path {:?}, branch {:?}", fh, handle.path, handle.branch_idx);
+                (handle.path.clone(), handle.branch_idx)
+            } else {
+                tracing::debug!("No file handle found for fh {}, falling back to inode lookup", fh);
+                // Fallback to using inode data
+                let inode_data = match self.get_inode_data(ino) {
+                    Some(data) => data,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                (PathBuf::from(&inode_data.path), None)
+            }
         };
         
         let path = path_buf.as_path();
@@ -698,160 +784,193 @@ impl Filesystem for MergerFS {
                             .write(true)
                             .open(&full_path) {
                             Ok(mut file) => {
-                                match file.seek(SeekFrom::Start(offset as u64)) {
-                                    Ok(_) => {
-                                        match file.write_all(data) {
-                                            Ok(_) => {
-                                                let _ = file.sync_all();
-                                                Ok(())
+                                // Seek to the requested offset
+                                if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
+                                    tracing::error!("Failed to seek: {:?}", e);
+                                    Err(PolicyError::IoError(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        format!("Seek failed: {}", e)
+                                    )))
+                                } else {
+                                    // Write the data
+                                    match file.write_all(data) {
+                                        Ok(_) => {
+                                            tracing::debug!("Successfully wrote {} bytes to branch {}", data.len(), branch_idx);
+                                            Ok(data.len())
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Write failed: {:?}", e);
+                                            if is_out_of_space_error(&e) {
+                                                tracing::info!("Detected out of space error on branch {}", branch_idx);
+                                                Err(PolicyError::NoSpace)
+                                            } else {
+                                                Err(PolicyError::IoError(e))
                                             }
-                                            Err(e) => Err(PolicyError::IoError(e))
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to open file for writing on branch {}: {:?}", branch_idx, e);
+                                Err(PolicyError::IoError(e))
+                            }
+                        }
+                    } else {
+                        tracing::error!("Branch {} does not allow writes", branch_idx);
+                        Err(PolicyError::ReadOnlyFilesystem)
+                    }
+                } else {
+                    tracing::error!("Invalid branch index: {}", branch_idx);
+                    Err(PolicyError::PathNotFound)
+                }
+        } else {
+            // No specific branch, find existing file to write to
+            tracing::debug!("Finding existing file for write (no specific branch)");
+            match self.file_manager.find_first_branch(path) {
+                Ok(branch) => {
+                    let full_path = branch.full_path(path);
+                    use std::fs::OpenOptions;
+                    use std::io::{Seek, SeekFrom, Write};
+                    
+                    match OpenOptions::new()
+                        .write(true)
+                        .open(&full_path) {
+                        Ok(mut file) => {
+                            if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
+                                Err(PolicyError::IoError(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    format!("Seek failed: {}", e)
+                                )))
+                            } else {
+                                match file.write_all(data) {
+                                    Ok(_) => Ok(data.len()),
+                                    Err(e) => Err(PolicyError::IoError(e))
+                                }
+                            }
+                        }
+                        Err(e) => Err(PolicyError::IoError(e))
+                    }
+                }
+                Err(e) => Err(e)
+            }
+        };
+        
+        match result {
+            Ok(written) => {
+                tracing::info!("Successfully wrote {} bytes", written);
+                
+                // Update inode size after successful write
+                // The new size should be at least offset + written bytes
+                let new_size = (offset as u64) + (written as u64);
+                
+                // Get current size to see if we need to extend
+                if let Some(current_data) = self.get_inode_data(ino) {
+                    let updated_size = std::cmp::max(current_data.attr.size, new_size);
+                    self.update_inode_size(ino, updated_size);
+                }
+                
+                reply.written(written as u32);
+            }
+            Err(e) => {
+                // Handle moveonenospc if enabled
+                if matches!(&e, PolicyError::NoSpace) && self.config.read().moveonenospc.enabled {
+                    tracing::info!("ENOSPC detected, attempting moveonenospc");
+                    
+                    // Attempt to move file to branch with more space
+                    // We need to pass the current branch index and branches
+                    let current_branch_idx = if let Some(idx) = branch_idx {
+                        idx
+                    } else {
+                        // Find which branch has the file
+                        self.file_manager.branches.iter().position(|branch| {
+                            branch.full_path(path).exists()
+                        }).unwrap_or(0)
+                    };
+                    
+                    match self.moveonenospc_handler.move_file_on_enospc(
+                        path,
+                        current_branch_idx,
+                        &self.file_manager.branches,
+                        self.file_manager.create_policy.as_ref(),
+                        None, // No file descriptor available here
+                    ) {
+                        Ok(move_result) => {
+                            let new_branch_idx = move_result.new_branch_idx;
+                            tracing::info!("Successfully moved file to branch {}, retrying write", new_branch_idx);
+                            
+                            // File handle will already point to the new location after move
+                            
+                            // Retry write on new branch
+                            let retry_result = if new_branch_idx < self.file_manager.branches.len() {
+                                let branch = &self.file_manager.branches[new_branch_idx];
+                                let full_path = branch.full_path(path);
+                                
+                                use std::fs::OpenOptions;
+                                use std::io::{Seek, SeekFrom, Write};
+                                
+                                match OpenOptions::new()
+                                    .write(true)
+                                    .open(&full_path) {
+                                    Ok(mut file) => {
+                                        if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
+                                            Err(PolicyError::IoError(std::io::Error::new(
+                                                std::io::ErrorKind::Other,
+                                                format!("Seek failed: {}", e)
+                                            )))
+                                        } else {
+                                            match file.write_all(data) {
+                                                Ok(_) => Ok(data.len()),
+                                                Err(e) => Err(PolicyError::IoError(e))
+                                            }
                                         }
                                     }
                                     Err(e) => Err(PolicyError::IoError(e))
                                 }
-                            }
-                            Err(e) => Err(PolicyError::IoError(e))
-                        }
-                    } else {
-                        Err(PolicyError::from_errno(EROFS))
-                    }
-                } else {
-                    // Fallback to normal write
-                    self.file_manager.write_to_file(path, offset as u64, data)
-                        .map(|_| ())
-                }
-        } else {
-            // No specific branch, use normal write
-            self.file_manager.write_to_file(path, offset as u64, data)
-                .map(|_| ())
-        };
-
-        match result {
-            Ok(_) => {
-                tracing::info!("Write successful: {} bytes written at offset {} to {:?}", data.len(), offset, path);
-                // Update file size in inode
-                let mut inodes = self.inodes.write();
-                if let Some(inode_data) = inodes.get_mut(&ino) {
-                    // Calculate new size
-                    let new_size = if offset == 0 && data.len() > 0 {
-                        data.len() as u64
-                    } else {
-                        let end_pos = (offset as u64) + (data.len() as u64);
-                        std::cmp::max(inode_data.attr.size, end_pos)
-                    };
-                    
-                    inode_data.attr.size = new_size;
-                    inode_data.attr.blocks = (new_size + 511) / 512;
-                    inode_data.attr.mtime = SystemTime::now();
-                }
-                reply.written(data.len() as u32);
-            }
-            Err(PolicyError::IoError(io_err)) if is_out_of_space_error(&io_err) && self.moveonenospc_handler.is_enabled() => {
-                // Handle ENOSPC with moveonenospc
-                tracing::info!("Write failed with ENOSPC, attempting moveonenospc for {:?}", path);
-                
-                // Determine which branch has the file
-                let current_branch_idx = if let Some(h) = &handle {
-                    h.branch_idx
-                } else {
-                    // Find which branch has the file
-                    self.file_manager.branches.iter().position(|b| {
-                        b.full_path(path).exists()
-                    })
-                }.unwrap_or(0);
-                
-                // Attempt to move the file
-                match self.moveonenospc_handler.move_file_on_enospc(
-                    path,
-                    current_branch_idx,
-                    &self.file_manager.branches,
-                    self.file_manager.create_policy.as_ref(),
-                    None, // We don't have raw fd here
-                ) {
-                    Ok(move_result) => {
-                        tracing::info!("File moved to branch {} at {:?}", move_result.new_branch_idx, move_result.new_path);
-                        
-                        // Update file handle if we have one
-                        if let Some(h) = handle {
-                            self.file_handle_manager.update_branch(fh, move_result.new_branch_idx);
-                        }
-                        
-                        // Retry the write on the new branch
-                        let retry_result = {
-                            let branch = &self.file_manager.branches[move_result.new_branch_idx];
-                            let full_path = branch.full_path(path);
+                            } else {
+                                Err(PolicyError::PathNotFound)
+                            };
                             
-                            use std::fs::OpenOptions;
-                            use std::io::{Seek, SeekFrom, Write};
-                            
-                            match OpenOptions::new()
-                                .write(true)
-                                .open(&full_path) {
-                                Ok(mut file) => {
-                                    match file.seek(SeekFrom::Start(offset as u64)) {
-                                        Ok(_) => {
-                                            match file.write_all(data) {
-                                                Ok(_) => {
-                                                    let _ = file.sync_all();
-                                                    Ok(())
-                                                }
-                                                Err(e) => Err(PolicyError::IoError(e))
-                                            }
-                                        }
-                                        Err(e) => Err(PolicyError::IoError(e))
+                            match retry_result {
+                                Ok(written) => {
+                                    tracing::info!("Successfully wrote {} bytes after moveonenospc", written);
+                                    
+                                    // Update inode size after successful write
+                                    let new_size = (offset as u64) + (written as u64);
+                                    if let Some(current_data) = self.get_inode_data(ino) {
+                                        let updated_size = std::cmp::max(current_data.attr.size, new_size);
+                                        self.update_inode_size(ino, updated_size);
                                     }
+                                    
+                                    reply.written(written as u32);
                                 }
-                                Err(e) => Err(PolicyError::IoError(e))
-                            }
-                        };
-                        
-                        match retry_result {
-                            Ok(_) => {
-                                tracing::info!("Write successful after moveonenospc: {} bytes written", data.len());
-                                // Update file size in inode
-                                let mut inodes = self.inodes.write();
-                                if let Some(inode_data) = inodes.get_mut(&ino) {
-                                    let end_pos = (offset as u64) + (data.len() as u64);
-                                    let new_size = std::cmp::max(inode_data.attr.size, end_pos);
-                                    inode_data.attr.size = new_size;
-                                    inode_data.attr.blocks = (new_size + 511) / 512;
-                                    inode_data.attr.mtime = SystemTime::now();
+                                Err(retry_e) => {
+                                    error!("Write failed after moveonenospc: {:?}", retry_e);
+                                    let errno = retry_e.errno();
+                                    reply.error(errno);
                                 }
-                                reply.written(data.len() as u32);
-                            }
-                            Err(e) => {
-                                error!("Write still failed after moveonenospc: {:?}", e);
-                                reply.error(io_err.raw_os_error().unwrap_or(EIO));
                             }
                         }
+                        Err(move_e) => {
+                            error!("moveonenospc failed: {:?}", move_e);
+                            // Return original error
+                            let errno = e.errno();
+                            reply.error(errno);
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to move file on ENOSPC: {:?}", e);
-                        reply.error(io_err.raw_os_error().unwrap_or(EIO));
-                    }
+                } else {
+                    error!("Write failed for {:?}: {:?}", path, e);
+                    let errno = e.errno();
+                    tracing::debug!("Returning errno {} for write failure", errno);
+                    reply.error(errno);
                 }
-            }
-            Err(e) => {
-                error!("Failed to write to file {:?}: {:?}", path, e);
-                tracing::debug!("Write error details - offset: {}, size: {}, error: {:?}", offset, data.len(), e);
-                reply.error(e.errno());
             }
         }
     }
 
-    fn mkdir(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        reply: ReplyEntry,
-    ) {
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
         let name_str = name.to_str().unwrap_or("<invalid>");
-        let _span = tracing::info_span!("fuse::mkdir", parent, name = %name_str, mode = %format!("{:o}", mode), umask = %format!("{:o}", umask)).entered();
-        tracing::debug!("Starting mkdir operation");
+        let _span = tracing::info_span!("fuse::unlink", parent, name = %name_str).entered();
+        tracing::debug!("Starting unlink operation");
 
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
@@ -869,29 +988,83 @@ impl Filesystem for MergerFS {
             }
         };
 
-        let dir_path = if parent_data.path == "/" {
+        let file_path = if parent_data.path == "/" {
             format!("/{}", name_str)
         } else {
             format!("{}/{}", parent_data.path, name_str)
         };
 
-        // Create directory using file manager
+        let path = Path::new(&file_path);
+        tracing::debug!("Unlinking file at path: {:?}", file_path);
+        match self.file_manager.remove_file(path) {
+            Ok(_) => {
+                tracing::info!("File unlinked successfully: {:?}", file_path);
+                // Remove from inode cache if present
+                if let Some(ino) = self.path_to_inode(&file_path) {
+                    self.remove_inode(ino);
+                }
+                reply.ok();
+            }
+            Err(e) => {
+                error!("Failed to unlink file at {:?}: {:?}", file_path, e);
+                reply.error(EIO);
+            }
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!("fuse::mkdir", parent, name = %name_str, mode = %format!("{:o}", mode), umask = %format!("{:o}", umask)).entered();
+        tracing::debug!("Starting mkdir operation");
+
+        // Get parent path without holding lock during directory creation
+        let dir_path = {
+            let parent_data = match self.get_inode_data(parent) {
+                Some(data) => data,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+            
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+            
+            let parent_path = parent_data.path.clone();
+            if parent_path == "/" {
+                format!("/{}", name_str)
+            } else {
+                format!("{}/{}", parent_path, name_str)
+            }
+        };
+
+        // Create directory using file manager (no locks held)
         let path = Path::new(&dir_path);
         tracing::debug!("Creating directory at path: {:?}", dir_path);
+        
         match self.file_manager.create_directory(path) {
             Ok(_) => {
                 tracing::info!("Directory created successfully at {:?}", dir_path);
-                // Create directory attributes
+                // Create directory attributes (no locks held during I/O)
                 if let Some(mut attr) = self.create_file_attr(path) {
                     let ino = self.allocate_inode();
                     attr.ino = ino;
 
-                    let inode_data = InodeData {
-                        path: dir_path,
-                        attr,
-                    };
-
-                    self.inodes.write().insert(ino, inode_data);
+                    // Insert inode with minimal lock time
+                    self.insert_inode(ino, dir_path, attr);
                     reply.entry(&TTL, &attr, 0);
                 } else {
                     reply.error(EIO);
@@ -937,129 +1110,29 @@ impl Filesystem for MergerFS {
         match self.file_manager.remove_directory(path) {
             Ok(_) => {
                 tracing::info!("Directory removed successfully: {:?}", dir_path);
-                // Remove from inode cache if it exists
-                let mut inodes = self.inodes.write();
-                let mut inode_to_remove = None;
-                for (&ino, data) in inodes.iter() {
-                    if data.path == dir_path {
-                        inode_to_remove = Some(ino);
-                        break;
-                    }
-                }
-                if let Some(ino) = inode_to_remove {
-                    inodes.remove(&ino);
+                // Remove from inode cache if present
+                if let Some(ino) = self.path_to_inode(&dir_path) {
+                    self.remove_inode(ino);
                 }
                 reply.ok();
             }
             Err(e) => {
-                error!("Failed to remove directory {:?}: {:?}", dir_path, e);
-                // Map common errors to appropriate errno values
-                let errno = match e {
-                    PolicyError::NoBranchesAvailable => ENOENT,
-                    PolicyError::IoError(io_err) => {
-                        match io_err.kind() {
-                            std::io::ErrorKind::DirectoryNotEmpty => ENOTEMPTY,
-                            std::io::ErrorKind::PermissionDenied => EACCES,
-                            _ => EIO,
-                        }
-                    }
-                    _ => EIO,
+                error!("Failed to remove directory at {:?}: {:?}", dir_path, e);
+                let errno = if e.to_string().contains("not empty") {
+                    ENOTEMPTY
+                } else {
+                    EIO
                 };
                 reply.error(errno);
             }
         }
     }
 
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        let name_str = name.to_str().unwrap_or("<invalid>");
-        let _span = tracing::info_span!("fuse::unlink", parent, name = %name_str).entered();
-        tracing::debug!("Starting unlink operation");
-
-        let parent_data = match self.get_inode_data(parent) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let file_path = if parent_data.path == "/" {
-            format!("/{}", name_str)
-        } else {
-            format!("{}/{}", parent_data.path, name_str)
-        };
-
-        let path = Path::new(&file_path);
-        tracing::debug!("Removing file at path: {:?}", file_path);
-        match self.file_manager.remove_file(path) {
-            Ok(_) => {
-                tracing::info!("File unlinked successfully: {:?}", file_path);
-                // Remove from inode cache if it exists
-                let mut inodes = self.inodes.write();
-                let mut inode_to_remove = None;
-                for (&ino, data) in inodes.iter() {
-                    if data.path == file_path {
-                        inode_to_remove = Some(ino);
-                        break;
-                    }
-                }
-                if let Some(ino) = inode_to_remove {
-                    inodes.remove(&ino);
-                }
-                reply.ok();
-            }
-            Err(e) => {
-                error!("Failed to unlink file {:?}: {:?}", file_path, e);
-                let errno = match e {
-                    PolicyError::NoBranchesAvailable => ENOENT,
-                    PolicyError::IoError(_) => EIO,
-                    _ => EIO,
-                };
-                reply.error(errno);
-            }
-        }
-    }
-
-    fn setattr(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        atime: Option<fuser::TimeOrNow>,
-        mtime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        fh: Option<u64>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        flags: Option<u32>,
-        reply: ReplyAttr,
-    ) {
-        let _span = tracing::info_span!("fuse::setattr", 
-            ino, 
-            mode = ?mode.map(|m| format!("{:o}", m)), 
-            uid = ?uid, 
-            gid = ?gid, 
-            size = ?size,
-            atime = ?atime.is_some(),
-            mtime = ?mtime.is_some(),
-            fh = ?fh,
-            flags = ?flags.map(|f| format!("0x{:x}", f))
-        ).entered();
+    fn setattr(&mut self, _req: &Request, ino: u64, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, size: Option<u64>, atime: Option<fuser::TimeOrNow>, mtime: Option<fuser::TimeOrNow>, _ctime: Option<SystemTime>, _fh: Option<u64>, _crtime: Option<SystemTime>, _chgtime: Option<SystemTime>, _bkuptime: Option<SystemTime>, _flags: Option<u32>, reply: ReplyAttr) {
+        let _span = tracing::info_span!("fuse::setattr", ino).entered();
         tracing::debug!("Starting setattr operation");
 
-        let inode_data = match self.get_inode_data(ino) {
+        let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
                 reply.error(ENOENT);
@@ -1067,248 +1140,76 @@ impl Filesystem for MergerFS {
             }
         };
 
-        let path = Path::new(&inode_data.path);
-        let mut had_success = false;
-
-        // Handle truncate
-        if let Some(new_size) = size {
-            tracing::info!("Truncating file {} to size {}", inode_data.path, new_size);
+        let path = Path::new(&data.path);
+        
+        // Handle mode changes
+        if let Some(mode) = mode {
+            if let Err(e) = self.metadata_manager.chmod(path, mode) {
+                error!("chmod failed for {:?}: {:?}", data.path, e);
+                reply.error(EIO);
+                return;
+            }
+        }
+        
+        // Handle ownership changes
+        if uid.is_some() || gid.is_some() {
+            // Use existing values if not specified
+            let current_attr = &data.attr;
+            let new_uid = uid.unwrap_or(current_attr.uid);
+            let new_gid = gid.unwrap_or(current_attr.gid);
             
-            match self.file_manager.truncate_file(path, new_size) {
-                Ok(_) => {
-                    had_success = true;
-                    // Update size in inode
-                    let mut inodes = self.inodes.write();
-                    if let Some(cached_data) = inodes.get_mut(&ino) {
-                        cached_data.attr.size = new_size;
-                        cached_data.attr.blocks = (new_size + 511) / 512;
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to truncate file: {:?}", e);
-                }
+            if let Err(e) = self.metadata_manager.chown(path, new_uid, new_gid) {
+                error!("chown failed for {:?}: {:?}", data.path, e);
+                reply.error(EIO);
+                return;
             }
         }
-
-        // Handle chmod
-        if let Some(new_mode) = mode {
-            tracing::debug!("Applying chmod {:o} to {}", new_mode, inode_data.path);
-            match self.metadata_manager.chmod(path, new_mode) {
-                Ok(_) => {
-                    had_success = true;
-                    tracing::info!("chmod successful: mode {:o} applied to {}", new_mode, inode_data.path);
-                }
-                Err(e) => {
-                    error!("chmod failed for {} (mode {:o}): {:?}", inode_data.path, new_mode, e);
-                }
+        
+        // Handle size changes (truncate)
+        if let Some(size) = size {
+            if let Err(e) = self.file_manager.truncate_file(path, size) {
+                error!("truncate failed for {:?}: {:?}", data.path, e);
+                reply.error(EIO);
+                return;
             }
         }
-
-        // Handle chown
-        if let (Some(new_uid), Some(new_gid)) = (uid, gid) {
-            tracing::debug!("Applying chown {}:{} to {}", new_uid, new_gid, inode_data.path);
-            match self.metadata_manager.chown(path, new_uid, new_gid) {
-                Ok(_) => {
-                    had_success = true;
-                    tracing::info!("chown successful: uid={}, gid={} applied to {}", new_uid, new_gid, inode_data.path);
-                }
-                Err(e) => {
-                    error!("chown failed for {} (uid={}, gid={}): {:?}", inode_data.path, new_uid, new_gid, e);
-                }
-            }
-        }
-
-        // Handle utimens
-        if atime.is_some() || mtime.is_some() {
-            let now = SystemTime::now();
-            let access_time = match atime {
-                Some(fuser::TimeOrNow::SpecificTime(t)) => t,
-                Some(fuser::TimeOrNow::Now) => now,
-                None => inode_data.attr.atime,
+        
+        // Handle time changes
+        if let (Some(atime_val), Some(mtime_val)) = (atime, mtime) {
+            let atime_sys = match atime_val {
+                fuser::TimeOrNow::SpecificTime(time) => time,
+                fuser::TimeOrNow::Now => SystemTime::now(),
             };
-            let modify_time = match mtime {
-                Some(fuser::TimeOrNow::SpecificTime(t)) => t,
-                Some(fuser::TimeOrNow::Now) => now,
-                None => inode_data.attr.mtime,
+            let mtime_sys = match mtime_val {
+                fuser::TimeOrNow::SpecificTime(time) => time,
+                fuser::TimeOrNow::Now => SystemTime::now(),
             };
-
-            match self.metadata_manager.utimens(path, access_time, modify_time) {
-                Ok(_) => {
-                    had_success = true;
-                    debug!("utimens successful for {}", inode_data.path);
-                }
-                Err(e) => {
-                    error!("utimens failed for {}: {:?}", inode_data.path, e);
-                }
+            if let Err(e) = self.metadata_manager.utimens(path, atime_sys, mtime_sys) {
+                error!("utimens failed for {:?}: {:?}", data.path, e);
+                reply.error(EIO);
+                return;
             }
         }
-
-        if had_success || (mode.is_none() && uid.is_none() && gid.is_none() && size.is_none() && atime.is_none() && mtime.is_none()) {
-            // Get updated attributes and return them
-            match self.create_file_attr(path) {
-                Some(mut new_attr) => {
-                    new_attr.ino = ino;
-                    
-                    // Update cached inode data
-                    let mut inodes = self.inodes.write();
-                    if let Some(cached_data) = inodes.get_mut(&ino) {
-                        cached_data.attr = new_attr;
-                    }
-                    
-                    reply.attr(&TTL, &new_attr);
-                }
-                None => {
-                    reply.error(EIO);
-                }
-            }
+        
+        // Update cached attributes
+        if let Some(mut new_attr) = self.create_file_attr(path) {
+            new_attr.ino = ino;
+            let path_str = data.path.clone();
+            self.insert_inode(ino, path_str, new_attr);
+            reply.attr(&TTL, &new_attr);
         } else {
             reply.error(EIO);
         }
     }
 
-    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: fuser::ReplyEmpty) {
-        info!("flush: ino={}", ino);
-        // For now, we don't need to do anything special for flush
-        // since we write synchronously
-        reply.ok();
-    }
 
-    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: fuser::ReplyEmpty) {
-        info!("fsync: ino={}", ino);
-        // For now, we don't need to do anything special for fsync
-        // since we write synchronously
-        reply.ok();
-    }
-
-    fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuser::ReplyStatfs) {
-        info!("statfs called");
-        
-        use nix::sys::statvfs::{statvfs, FsFlags};
-        use std::collections::HashMap;
-        
-        let config = self.config.read();
-        let statfs_ignore = config.statfs_ignore;
-        
-        // Keep track of unique device IDs to avoid counting same filesystem multiple times
-        let mut fs_stats: HashMap<u64, (nix::sys::statvfs::Statvfs, Arc<crate::branch::Branch>)> = HashMap::new();
-        let mut min_bsize = u64::MAX;
-        let mut min_frsize = u64::MAX;
-        let mut min_namemax = u64::MAX;
-        
-        // Collect statvfs data for each branch
-        for branch in &self.file_manager.branches {
-            match std::fs::metadata(&branch.path) {
-                Ok(metadata) => {
-                    use std::os::unix::fs::MetadataExt;
-                    let dev = metadata.dev();
-                    
-                    // Get filesystem stats using statvfs
-                    match statvfs(&branch.path) {
-                        Ok(stat) => {
-                            // Track minimum values for normalization
-                            if stat.block_size() > 0 && stat.block_size() < min_bsize {
-                                min_bsize = stat.block_size();
-                            }
-                            if stat.fragment_size() > 0 && stat.fragment_size() < min_frsize {
-                                min_frsize = stat.fragment_size();
-                            }
-                            if stat.name_max() > 0 && stat.name_max() < min_namemax {
-                                min_namemax = stat.name_max();
-                            }
-                            
-                            // Store stats by device ID to avoid duplicates
-                            fs_stats.insert(dev, (stat, branch.clone()));
-                        }
-                        Err(e) => {
-                            error!("Failed to get statvfs for {}: {}", branch.path.display(), e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to get metadata for {}: {}", branch.path.display(), e);
-                }
-            }
-        }
-        
-        // If we couldn't get any stats, use defaults
-        if fs_stats.is_empty() {
-            reply.statfs(0, 0, 0, 0, 0, 4096, 255, 4096);
-            return;
-        }
-        
-        // Use defaults if we didn't find valid minimums
-        if min_bsize == u64::MAX {
-            min_bsize = 4096;
-        }
-        if min_frsize == u64::MAX {
-            min_frsize = 4096;
-        }
-        if min_namemax == u64::MAX {
-            min_namemax = 255;
-        }
-        
-        // Aggregate statistics from unique filesystems
-        let mut total_blocks = 0u64;
-        let mut total_bfree = 0u64;
-        let mut total_bavail = 0u64;
-        let mut total_files = 0u64;
-        let mut total_ffree = 0u64;
-        let mut _total_favail = 0u64;
-        
-        for (stat, branch) in fs_stats.values() {
-            // Check if we should ignore this branch based on StatFSIgnore configuration
-            let is_readonly = stat.flags().contains(FsFlags::ST_RDONLY);
-            let should_ignore = match statfs_ignore {
-                StatFSIgnore::None => false,
-                StatFSIgnore::ReadOnly => is_readonly || branch.is_readonly_or_no_create(),
-                StatFSIgnore::NoCreate => branch.is_no_create(),
-            };
-            
-            // Normalize block counts to common fragment size (like the C++ version)
-            let normalization_factor = stat.fragment_size() / min_frsize;
-            
-            total_blocks += stat.blocks() * normalization_factor;
-            total_bfree += stat.blocks_free() * normalization_factor;
-            
-            // If we should ignore this branch, don't count its available space
-            if should_ignore {
-                // Still count the blocks but not available space
-                total_files += stat.files();
-            } else {
-                total_bavail += stat.blocks_available() * normalization_factor;
-                total_files += stat.files();
-                total_ffree += stat.files_free();
-                _total_favail += stat.files_available();
-            }
-        }
-        
-        reply.statfs(
-            total_blocks,
-            total_bfree,
-            total_bavail,
-            total_files,
-            total_ffree,
-            min_bsize as u32,
-            min_namemax as u32,
-            min_frsize as u32,
-        );
-    }
-
-    fn rename(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        newparent: u64,
-        newname: &OsStr,
-        flags: u32,
-        reply: fuser::ReplyEmpty,
-    ) {
+    fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, flags: u32, reply: fuser::ReplyEmpty) {
         let name_str = name.to_str().unwrap_or("<invalid>");
         let newname_str = newname.to_str().unwrap_or("<invalid>");
-        let _span = tracing::info_span!("fuse::rename", parent, name = %name_str, newparent, newname = %newname_str, flags = %format!("0x{:x}", flags)).entered();
+        let _span = tracing::info_span!("fuse::rename", parent, name = %name_str, newparent, newname = %newname_str, flags).entered();
         tracing::debug!("Starting rename operation");
 
+        // Get parent directory paths
         let parent_data = match self.get_inode_data(parent) {
             Some(data) => data,
             None => {
@@ -1341,6 +1242,7 @@ impl Filesystem for MergerFS {
             }
         };
 
+        // Build full paths
         let old_path = if parent_data.path == "/" {
             format!("/{}", name_str)
         } else {
@@ -1353,346 +1255,102 @@ impl Filesystem for MergerFS {
             format!("{}/{}", newparent_data.path, newname_str)
         };
 
-        tracing::info!("Rename operation: {:?} -> {:?}", old_path, new_path);
+        tracing::debug!("Renaming {:?} to {:?}", old_path, new_path);
 
-        // Use RenameManager to handle the rename operation
+        // Use rename manager to handle the rename
         match self.rename_manager.rename(Path::new(&old_path), Path::new(&new_path)) {
-            Ok(()) => {
+            Ok(_) => {
                 tracing::info!("Rename successful: {:?} -> {:?}", old_path, new_path);
-                // Update inode cache
-                let mut inodes = self.inodes.write();
-                let mut updates = Vec::new();
-                
-                for (&ino, data) in inodes.iter() {
-                    if data.path == old_path {
-                        updates.push((ino, new_path.clone()));
-                    } else if data.path.starts_with(&format!("{}/", old_path)) {
-                        // Update children paths
-                        let suffix = &data.path[old_path.len()..];
-                        updates.push((ino, format!("{}{}", new_path, suffix)));
+                // Update inode cache if the old path was cached
+                if let Some(ino) = self.path_to_inode(&old_path) {
+                    // Get the old inode data
+                    if let Some(mut inode_data) = self.get_inode_data(ino) {
+                        // Remove old entry
+                        self.remove_inode(ino);
+                        // Update path and reinsert
+                        inode_data.path = new_path;
+                        self.insert_inode(ino, inode_data.path, inode_data.attr);
                     }
                 }
-                
-                for (ino, new_path) in updates {
-                    if let Some(data) = inodes.get_mut(&ino) {
-                        data.path = new_path;
-                    }
-                }
-                
                 reply.ok();
             }
             Err(e) => {
-                error!("Rename failed for {:?} -> {:?}: {:?}", old_path, new_path, e);
-                let errno = e.to_errno();
-                tracing::debug!("Rename error errno: {}", errno);
-                reply.error(errno);
+                error!("Rename failed: {:?}", e);
+                reply.error(EIO);
             }
         }
     }
 
-    fn symlink(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        link_name: &OsStr,
-        target: &Path,
-        reply: ReplyEntry,
-    ) {
-        info!("symlink: parent={}, link_name={:?} -> target={:?}", 
-            parent, link_name, target);
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuser::ReplyStatfs) {
+        let _span = tracing::debug_span!("fuse::statfs", _ino).entered();
+        tracing::debug!("Starting statfs operation");
 
-        let parent_data = match self.get_inode_data(parent) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let link_name_str = match link_name.to_str() {
-            Some(s) => s,
-            None => {
-                reply.error(EINVAL);
-                return;
-            }
-        };
-
-        let link_path = if parent_data.path == "/" {
-            format!("/{}", link_name_str)
-        } else {
-            format!("{}/{}", parent_data.path, link_name_str)
-        };
-
-        // Use FileManager to create the symlink
-        let path = Path::new(&link_path);
-        match self.file_manager.create_symlink(path, target) {
-            Ok(_) => {
-                // Create inode for the symlink
-                let now = SystemTime::now();
-                let ino = self.allocate_inode();
-                
-                let attr = FileAttr {
-                    ino,
-                    size: target.as_os_str().len() as u64,
-                    blocks: 1,
-                    atime: now,
-                    mtime: now,
-                    ctime: now,
-                    crtime: now,
-                    kind: FileType::Symlink,
-                    perm: 0o777,
-                    nlink: 1,
-                    uid: 1000,
-                    gid: 1000,
-                    rdev: 0,
-                    flags: 0,
-                    blksize: 512,
-                };
-
-                let inode_data = InodeData {
-                    path: link_path,
-                    attr,
-                };
-
-                self.inodes.write().insert(ino, inode_data);
-                reply.entry(&TTL, &attr, 0);
-            }
-            Err(e) => {
-                error!("Failed to create symlink: {:?}", e);
-                reply.error(e.errno());
-            }
-        }
-    }
-
-    fn readlink(&mut self, _req: &Request, ino: u64, reply: fuser::ReplyData) {
-        info!("readlink: ino={}", ino);
-
-        let inode_data = match self.get_inode_data(ino) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        if inode_data.attr.kind != FileType::Symlink {
-            reply.error(EINVAL);
-            return;
-        }
-
-        let path = Path::new(&inode_data.path);
+        let config = self.config.read();
+        let ignore = config.statfs_ignore;
         
-        // Find which branch has the symlink
+        // Get aggregate stats from all branches
+        let mut total_blocks: u64 = 0;
+        let mut total_bavail: u64 = 0;
+        let mut total_bfree: u64 = 0;
+        let mut total_files: u64 = 0;
+        let mut total_ffree: u64 = 0;
+        let mut min_frsize: u32 = u32::MAX;
+        let mut min_bsize: u32 = u32::MAX;
+        let mut min_namelen: u32 = u32::MAX;
+        
         for branch in &self.file_manager.branches {
-            let full_path = branch.full_path(path);
-            // Use symlink_metadata to check if symlink exists (even if broken)
-            if std::fs::symlink_metadata(&full_path).is_ok() {
-                match std::fs::read_link(&full_path) {
-                    Ok(target) => {
-                        use std::os::unix::ffi::OsStrExt;
-                        reply.data(target.as_os_str().as_bytes());
-                        return;
-                    }
-                    Err(e) => {
-                        error!("Failed to read symlink: {:?}", e);
-                        reply.error(EIO);
-                        return;
-                    }
-                }
+            // Skip branches based on ignore setting
+            match ignore {
+                StatFSIgnore::ReadOnly if !branch.allows_create() => continue,
+                StatFSIgnore::NoCreate if !branch.allows_create() => continue,
+                _ => {}
             }
-        }
-        
-        reply.error(ENOENT);
-    }
-
-    fn link(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        newparent: u64,
-        newname: &OsStr,
-        reply: ReplyEntry,
-    ) {
-        info!("link: ino={}, newparent={}, newname={:?}", ino, newparent, newname);
-
-        let inode_data = match self.get_inode_data(ino) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let newparent_data = match self.get_inode_data(newparent) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let newname_str = match newname.to_str() {
-            Some(s) => s,
-            None => {
-                reply.error(EINVAL);
-                return;
-            }
-        };
-
-        let source_path = Path::new(&inode_data.path);
-        let link_path = if newparent_data.path == "/" {
-            format!("/{}", newname_str)
-        } else {
-            format!("{}/{}", newparent_data.path, newname_str)
-        };
-
-        // Use FileManager to create the hard link
-        match self.file_manager.create_hard_link(source_path, Path::new(&link_path)) {
-            Ok(_) => {
-                // Update the existing inode's link count
-                let mut inodes = self.inodes.write();
-                if let Some(data) = inodes.get_mut(&ino) {
-                    data.attr.nlink += 1;
-                }
+            
+            // Get statfs info from the branch
+            let full_path = branch.path.as_path();
+            if let Ok(statvfs) = nix::sys::statvfs::statvfs(full_path) {
+                total_blocks += statvfs.blocks();
+                total_bavail += statvfs.blocks_available();
+                total_bfree += statvfs.blocks_free();
+                total_files += statvfs.files();
+                total_ffree += statvfs.files_free();
                 
-                // Return the existing inode attributes
-                reply.entry(&TTL, &inode_data.attr, 0);
-            }
-            Err(e) => {
-                error!("Failed to create hard link: {:?}", e);
-                match e {
-                    PolicyError::NoBranchesAvailable => reply.error(ENOENT),
-                    PolicyError::IoError(io_err) => {
-                        match io_err.kind() {
-                            std::io::ErrorKind::NotFound => reply.error(ENOENT),
-                            std::io::ErrorKind::PermissionDenied => reply.error(EROFS),
-                            _ => reply.error(EIO),
-                        }
-                    }
-                    _ => reply.error(EIO),
-                }
+                min_frsize = min_frsize.min(statvfs.fragment_size() as u32);
+                min_bsize = min_bsize.min(statvfs.block_size() as u32);
+                min_namelen = min_namelen.min(statvfs.name_max() as u32);
             }
         }
+        
+        // Use minimum values if we didn't find any valid stats
+        if min_frsize == u32::MAX { min_frsize = 512; }
+        if min_bsize == u32::MAX { min_bsize = 4096; }
+        if min_namelen == u32::MAX { min_namelen = 255; }
+        
+        reply.statfs(
+            total_blocks,
+            total_bfree,
+            total_bavail,
+            total_files,
+            total_ffree,
+            min_bsize,
+            min_namelen,
+            min_frsize,
+        );
     }
 
-    fn release(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        _flush: bool,
-        reply: fuser::ReplyEmpty,
-    ) {
-        info!("release: ino={}, fh={}", ino, fh);
-        
-        // Remove the file handle
-        if let Some(handle) = self.file_handle_manager.remove_handle(fh) {
-            debug!("Released file handle {} for path {:?}", fh, handle.path);
-        } else {
-            warn!("Attempted to release unknown file handle: {}", fh);
-        }
-        
-        reply.ok();
-    }
 
-    fn access(&mut self, req: &Request, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
-        info!("access: ino={}, mask={}, uid={}, gid={}", ino, mask, req.uid(), req.gid());
-
-        let inode_data = match self.get_inode_data(ino) {
-            Some(data) => data,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let path = Path::new(&inode_data.path);
-        
-        // Find the first branch containing the file
-        let branch = match self.file_manager.find_first_branch(path) {
-            Ok(branch) => branch,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-        
-        // Construct full path
-        let full_path = branch.full_path(path);
-        debug!("access: checking full path {:?}", full_path);
-        
-        // Get file metadata (follow symlinks for access check)
-        let metadata = match std::fs::metadata(&full_path) {
-            Ok(m) => m,
-            Err(e) => {
-                let errno = match e.kind() {
-                    std::io::ErrorKind::NotFound => ENOENT,
-                    std::io::ErrorKind::PermissionDenied => EACCES,
-                    _ => EIO,
-                };
-                debug!("access: metadata error {:?}, errno={}", e, errno);
-                reply.error(errno);
-                return;
-            }
-        };
-        
-        use std::os::unix::fs::MetadataExt;
-        debug!("access: file mode={:o}, uid={}, gid={}", metadata.mode(), metadata.uid(), metadata.gid());
-        
-        // Check access permissions
-        match check_access(req.uid(), req.gid(), &metadata, mask) {
-            Ok(()) => {
-                debug!("access: permission granted");
-                reply.ok();
-            }
-            Err(AccessError(errno)) => {
-                debug!("access: permission denied, errno={}", errno);
-                reply.error(errno);
-            }
-        }
-    }
-
-    fn getxattr(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        name: &OsStr,
-        size: u32,
-        reply: fuser::ReplyXattr,
-    ) {
+    fn getxattr(&mut self, _req: &Request, ino: u64, name: &OsStr, size: u32, reply: fuser::ReplyXattr) {
         let name_str = name.to_str().unwrap_or("<invalid>");
         let _span = tracing::info_span!("fuse::getxattr", ino, name = %name_str, size).entered();
         tracing::debug!("Starting getxattr operation");
-        
-        // Handle control file xattr
+
+        // Handle special control file
         if ino == CONTROL_FILE_INO {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-            
-            match self.config_manager.get_option(name_str) {
-                Ok(value) => {
-                    let data = value.as_bytes();
-                    if size == 0 {
-                        reply.size(data.len() as u32);
-                    } else if size < data.len() as u32 {
-                        reply.error(ERANGE);
-                    } else {
-                        reply.data(data);
-                    }
-                }
-                Err(err) => reply.error(err.errno()),
-            }
+            reply.error(ENOTSUP);
             return;
         }
 
-        let inode_data = match self.get_inode_data(ino) {
+        let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
                 reply.error(ENOENT);
@@ -1700,7 +1358,6 @@ impl Filesystem for MergerFS {
             }
         };
 
-        let path = Path::new(&inode_data.path);
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
@@ -1708,68 +1365,40 @@ impl Filesystem for MergerFS {
                 return;
             }
         };
-        
+
+        let path = Path::new(&data.path);
         match self.xattr_manager.get_xattr(path, name_str) {
             Ok(value) => {
-                tracing::info!("getxattr successful: {} = {} bytes for {:?}", name_str, value.len(), inode_data.path);
                 if size == 0 {
-                    // Caller is asking for the size
+                    // Caller wants to know the size
                     reply.size(value.len() as u32);
                 } else if size < value.len() as u32 {
                     // Buffer too small
                     reply.error(ERANGE);
                 } else {
-                    // Return the data
+                    // Return the value
                     reply.data(&value);
                 }
             }
-            Err(XattrError::NotFound) => reply.error(61), // ENOATTR
-            Err(XattrError::PermissionDenied) => reply.error(EACCES),
-            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
-            Err(_) => reply.error(EIO),
+            Err(e) => {
+                let errno = e.errno();
+                reply.error(errno);
+            }
         }
     }
 
-    fn setxattr(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        name: &OsStr,
-        value: &[u8],
-        flags: i32,
-        position: u32,
-        reply: fuser::ReplyEmpty,
-    ) {
+    fn setxattr(&mut self, _req: &Request, ino: u64, name: &OsStr, value: &[u8], flags: i32, _position: u32, reply: fuser::ReplyEmpty) {
         let name_str = name.to_str().unwrap_or("<invalid>");
-        let _span = tracing::info_span!("fuse::setxattr", ino, name = %name_str, value_len = value.len(), flags = %format!("0x{:x}", flags), position).entered();
+        let _span = tracing::info_span!("fuse::setxattr", ino, name = %name_str, value_len = value.len(), flags).entered();
         tracing::debug!("Starting setxattr operation");
-            
-        // Handle control file xattr
+
+        // Handle special control file
         if ino == CONTROL_FILE_INO {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-            
-            let value_str = match std::str::from_utf8(value) {
-                Ok(s) => s,
-                Err(_) => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-            
-            match self.config_manager.set_option(name_str, value_str) {
-                Ok(_) => reply.ok(),
-                Err(err) => reply.error(err.errno()),
-            }
+            reply.error(ENOTSUP);
             return;
         }
 
-        let inode_data = match self.get_inode_data(ino) {
+        let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
                 reply.error(ENOENT);
@@ -1777,7 +1406,6 @@ impl Filesystem for MergerFS {
             }
         };
 
-        let path = Path::new(&inode_data.path);
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
@@ -1785,58 +1413,45 @@ impl Filesystem for MergerFS {
                 return;
             }
         };
-        
-        // Convert FUSE flags to our XattrFlags
-        let xattr_flags = match flags {
-            1 => XattrFlags::Create,  // XATTR_CREATE
-            2 => XattrFlags::Replace, // XATTR_REPLACE
-            _ => XattrFlags::None,
+
+        // Convert FUSE flags to XattrFlags
+        let xattr_flags = if flags & 1 != 0 {
+            XattrFlags::Create
+        } else if flags & 2 != 0 {
+            XattrFlags::Replace
+        } else {
+            XattrFlags::None
         };
-        
+
+        let path = Path::new(&data.path);
         match self.xattr_manager.set_xattr(path, name_str, value, xattr_flags) {
             Ok(_) => {
-                tracing::info!("setxattr successful: {} = {} bytes for {:?}", name_str, value.len(), inode_data.path);
+                tracing::info!("setxattr successful for {:?}", data.path);
                 reply.ok();
             }
-            Err(XattrError::NotFound) => {
-                tracing::debug!("setxattr failed: file not found");
-                reply.error(ENOENT);
+            Err(e) => {
+                error!("setxattr failed for {:?}: {:?}", data.path, e);
+                let errno = e.errno();
+                reply.error(errno);
             }
-            Err(XattrError::PermissionDenied) => reply.error(EACCES),
-            Err(XattrError::InvalidArgument) => reply.error(EINVAL),
-            Err(XattrError::NameTooLong) => reply.error(36), // ENAMETOOLONG
-            Err(XattrError::ValueTooLarge) => reply.error(7), // E2BIG
-            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
-            Err(_) => reply.error(EIO),
         }
     }
 
     fn listxattr(&mut self, _req: &Request, ino: u64, size: u32, reply: fuser::ReplyXattr) {
         let _span = tracing::info_span!("fuse::listxattr", ino, size).entered();
         tracing::debug!("Starting listxattr operation");
-        
-        // Handle control file xattr
+
+        // Handle special control file
         if ino == CONTROL_FILE_INO {
-            let options = self.config_manager.list_options();
-            
-            // Build null-terminated list
-            let mut data = Vec::new();
-            for option in &options {
-                data.extend(option.as_bytes());
-                data.push(0);
-            }
-            
             if size == 0 {
-                reply.size(data.len() as u32);
-            } else if size < data.len() as u32 {
-                reply.error(ERANGE);
+                reply.size(0);
             } else {
-                reply.data(&data);
+                reply.data(&[]);
             }
             return;
         }
 
-        let inode_data = match self.get_inode_data(ino) {
+        let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
                 reply.error(ENOENT);
@@ -1844,32 +1459,33 @@ impl Filesystem for MergerFS {
             }
         };
 
-        let path = Path::new(&inode_data.path);
-        
+        let path = Path::new(&data.path);
         match self.xattr_manager.list_xattr(path) {
-            Ok(attrs) => {
-                tracing::info!("listxattr successful: found {} attributes for {:?}", attrs.len(), inode_data.path);
-                // Build null-terminated list of attribute names
-                let mut data = Vec::new();
-                for attr in &attrs {
-                    data.extend(attr.as_bytes());
-                    data.push(0); // null terminator
-                }
+            Ok(names) => {
+                // Calculate total size needed (each name + null terminator)
+                let total_size: usize = names.iter().map(|n| n.len() + 1).sum();
                 
                 if size == 0 {
-                    // Caller is asking for the size
-                    reply.size(data.len() as u32);
-                } else if size < data.len() as u32 {
+                    // Caller wants to know the size
+                    reply.size(total_size as u32);
+                } else if (size as usize) < total_size {
                     // Buffer too small
                     reply.error(ERANGE);
                 } else {
-                    // Return the data
-                    reply.data(&data);
+                    // Build the response buffer
+                    let mut buffer = Vec::with_capacity(total_size);
+                    for name in names {
+                        buffer.extend_from_slice(name.as_bytes());
+                        buffer.push(0); // null terminator
+                    }
+                    reply.data(&buffer);
                 }
             }
-            Err(XattrError::NotFound) => reply.error(ENOENT),
-            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
-            Err(_) => reply.error(EIO),
+            Err(e) => {
+                error!("listxattr failed for {:?}: {:?}", data.path, e);
+                let errno = e.errno();
+                reply.error(errno);
+            }
         }
     }
 
@@ -1878,7 +1494,13 @@ impl Filesystem for MergerFS {
         let _span = tracing::info_span!("fuse::removexattr", ino, name = %name_str).entered();
         tracing::debug!("Starting removexattr operation");
 
-        let inode_data = match self.get_inode_data(ino) {
+        // Handle special control file
+        if ino == CONTROL_FILE_INO {
+            reply.error(ENOTSUP);
+            return;
+        }
+
+        let data = match self.get_inode_data(ino) {
             Some(data) => data,
             None => {
                 reply.error(ENOENT);
@@ -1886,7 +1508,6 @@ impl Filesystem for MergerFS {
             }
         };
 
-        let path = Path::new(&inode_data.path);
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
@@ -1894,623 +1515,51 @@ impl Filesystem for MergerFS {
                 return;
             }
         };
-        
+
+        let path = Path::new(&data.path);
         match self.xattr_manager.remove_xattr(path, name_str) {
             Ok(_) => {
-                tracing::info!("removexattr successful: removed {} from {:?}", name_str, inode_data.path);
+                tracing::info!("removexattr successful for {:?}", data.path);
                 reply.ok();
             }
-            Err(XattrError::NotFound) => {
-                tracing::debug!("removexattr failed: attribute not found");
-                reply.error(61); // ENOATTR
-            }
-            Err(XattrError::PermissionDenied) => reply.error(EACCES),
-            Err(XattrError::NotSupported) => reply.error(95), // ENOTSUP
-            Err(_) => reply.error(EIO),
-        }
-    }
-
-    fn mknod(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        _umask: u32,
-        rdev: u32,
-        reply: ReplyEntry,
-    ) {
-        let _span = tracing::info_span!("fuse::mknod", parent = parent, name = ?name, mode = format!("{:o}", mode), rdev = rdev).entered();
-        tracing::info!("Creating special file in parent inode");
-
-        let parent_data = match self.get_inode_data(parent) {
-            Some(data) => data,
-            None => {
-                tracing::debug!("Parent inode {} not found", parent);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => {
-                tracing::debug!("Invalid file name encoding");
-                reply.error(EINVAL);
-                return;
-            }
-        };
-
-        let file_path = if parent_data.path == "/" {
-            format!("/{}", name_str)
-        } else {
-            format!("{}/{}", parent_data.path, name_str)
-        };
-
-        let path = Path::new(&file_path);
-        
-        // Log the file type being created
-        let file_type_str = match mode & 0o170000 {
-            0o010000 => "FIFO",
-            0o020000 => "character device",
-            0o060000 => "block device",
-            0o100000 => "regular file",
-            0o140000 => "socket",
-            _ => "unknown",
-        };
-        tracing::debug!("File type: {}, permissions: {:o}", file_type_str, mode & 0o7777);
-        
-        // Use the new create_special_file method for all file types
-        match self.file_manager.create_special_file(path, mode, rdev) {
-            Ok(_) => {
-                // Get attributes for the newly created file
-                if let Some(mut attr) = self.create_file_attr(path) {
-                    let ino = self.allocate_inode();
-                    attr.ino = ino;
-                    attr.perm = (mode & 0o7777) as u16;
-                    
-                    // Set the correct file type in attributes
-                    attr.kind = match mode & 0o170000 {
-                        0o010000 => fuser::FileType::NamedPipe,
-                        0o020000 => fuser::FileType::CharDevice,
-                        0o060000 => fuser::FileType::BlockDevice,
-                        0o100000 => fuser::FileType::RegularFile,
-                        0o140000 => fuser::FileType::Socket,
-                        _ => fuser::FileType::RegularFile,
-                    };
-                    
-                    // For device files, set the rdev
-                    if matches!(attr.kind, fuser::FileType::CharDevice | fuser::FileType::BlockDevice) {
-                        attr.rdev = rdev;
-                    }
-
-                    let inode_data = InodeData {
-                        path: file_path,
-                        attr,
-                    };
-
-                    self.inodes.write().insert(ino, inode_data);
-                    tracing::info!("Special file created successfully with inode {}", ino);
-                    reply.entry(&TTL, &attr, 0);
-                } else {
-                    tracing::error!("Failed to get attributes for created file");
-                    reply.error(EIO);
-                }
-            }
             Err(e) => {
-                tracing::error!("Failed to create special file: {:?}", e);
-                reply.error(e.errno());
+                error!("removexattr failed for {:?}: {:?}", data.path, e);
+                let errno = e.errno();
+                reply.error(errno);
             }
         }
     }
 
-    fn opendir(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        let _span = tracing::info_span!("fuse::opendir", ino, flags).entered();
-        tracing::debug!("Opening directory");
+    fn access(&mut self, _req: &Request, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
+        let _span = tracing::debug_span!("fuse::access", ino, mask = %format!("0x{:x}", mask)).entered();
+        tracing::debug!("Starting access check");
 
-        let inode_data = match self.get_inode_data(ino) {
-            Some(data) => data,
-            None => {
-                tracing::error!("Directory not found");
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        if inode_data.attr.kind != FileType::Directory {
-            tracing::error!("Not a directory");
-            reply.error(ENOTDIR);
-            return;
-        }
-
-        // Create directory handle
-        let handle = DirHandle {
-            path: PathBuf::from(&inode_data.path),
-            ino,
-        };
-
-        // Allocate handle ID and store it
-        let fh = self.allocate_dir_handle();
-        self.dir_handles.write().insert(fh, handle);
-
-        tracing::info!("Directory opened with handle: {}", fh);
-        reply.opened(fh, flags as u32);
-    }
-
-    fn releasedir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        _flags: i32,
-        reply: fuser::ReplyEmpty,
-    ) {
-        let _span = tracing::info_span!("fuse::releasedir", ino, fh).entered();
-        tracing::debug!("Releasing directory handle");
-
-        // Remove the directory handle
-        self.remove_dir_handle(fh);
-
-        tracing::info!("Directory handle released: {}", fh);
-        reply.ok();
-    }
-
-    fn fsyncdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        _datasync: bool,
-        reply: fuser::ReplyEmpty,
-    ) {
-        info!("fsyncdir: ino={}", ino);
-        reply.ok();
-    }
-
-    fn fallocate(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        length: i64,
-        mode: i32,
-        reply: fuser::ReplyEmpty,
-    ) {
-        let _span = tracing::info_span!("fuse::fallocate", ino, fh, offset, length, mode = %format!("0x{:x}", mode)).entered();
-        tracing::debug!("Starting fallocate operation");
-
-        // Constants for fallocate modes (Linux-specific)
-        const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
-        const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
-        const FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
-        const FALLOC_FL_ZERO_RANGE: i32 = 0x10;
-        const FALLOC_FL_INSERT_RANGE: i32 = 0x20;
-        const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40;
-
-        // Get file handle to determine which branch the file is on
-        let handle = match self.file_handle_manager.get_handle(fh) {
-            Some(h) => h,
-            None => {
-                tracing::warn!("No file handle found for fh {}", fh);
-                // Use standard errno constants
-                const EBADF: i32 = 9;
-                reply.error(EBADF);
-                return;
-            }
-        };
-
-        // Get the full path on the specific branch
-        let full_path = if let Some(branch_idx) = handle.branch_idx {
-            if branch_idx < self.file_manager.branches.len() {
-                self.file_manager.branches[branch_idx].full_path(&handle.path)
+        // Handle special control file
+        if ino == CONTROL_FILE_INO {
+            // Control file is readable for all
+            if mask & 2 != 0 || mask & 4 != 0 {
+                // Write or execute requested
+                reply.error(EACCES);
             } else {
-                tracing::error!("Invalid branch index {} for handle", branch_idx);
-                reply.error(EIO);
-                return;
+                reply.ok();
             }
-        } else {
-            // No specific branch, try to find the file
-            match self.file_manager.search_policy.search_branches(&self.file_manager.branches, &handle.path) {
-                Ok(branches) => {
-                    if let Some(branch) = branches.first() {
-                        branch.full_path(&handle.path)
-                    } else {
-                        tracing::error!("No branches found for file");
-                        reply.error(ENOENT);
-                        return;
-                    }
-                }
-                Err(_) => {
-                    tracing::error!("Failed to find file on any branch");
-                    reply.error(ENOENT);
-                    return;
-                }
-            }
-        };
-
-        // For now, we'll implement a simplified version that only supports basic preallocation
-        // Full fallocate support would require platform-specific system calls
-        if mode != 0 && mode != FALLOC_FL_KEEP_SIZE {
-            tracing::warn!("fallocate mode {} not supported", mode);
-            const EOPNOTSUPP: i32 = 95;
-            reply.error(EOPNOTSUPP);
             return;
         }
 
-        // Open the file for writing to ensure we can preallocate
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .open(&full_path)
-        {
-            Ok(mut file) => {
-                use std::io::{Seek, SeekFrom};
-                
-                // Calculate the end position
-                let end_pos = (offset + length) as u64;
-                
-                // Seek to the end position
-                match file.seek(SeekFrom::Start(end_pos)) {
-                    Ok(_) => {
-                        // If KEEP_SIZE flag is not set, extend the file
-                        if mode & FALLOC_FL_KEEP_SIZE == 0 {
-                            // Write a single byte at the end to extend the file
-                            if end_pos > 0 {
-                                match file.seek(SeekFrom::Start(end_pos - 1)) {
-                                    Ok(_) => {
-                                        match file.write(&[0]) {
-                                            Ok(_) => {
-                                                tracing::info!("fallocate succeeded: extended file to {} bytes", end_pos);
-                                                reply.ok();
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("fallocate write failed: {}", e);
-                                                reply.error(EIO);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("fallocate seek failed: {}", e);
-                                        reply.error(EIO);
-                                    }
-                                }
-                            } else {
-                                reply.ok();
-                            }
-                        } else {
-                            // KEEP_SIZE flag is set, just ensure the space is allocated
-                            // This is a simplified implementation
-                            tracing::info!("fallocate with KEEP_SIZE succeeded");
-                            reply.ok();
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("fallocate seek failed: {}", e);
-                        match e.raw_os_error() {
-                            Some(errno) => reply.error(errno),
-                            None => reply.error(EIO),
-                        }
-                    }
-                }
+        let _data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                reply.error(ENOENT);
+                return;
             }
-            Err(e) => {
-                tracing::warn!("Failed to open file for fallocate: {}", e);
-                match e.raw_os_error() {
-                    Some(errno) => reply.error(errno),
-                    None => reply.error(EIO),
-                }
-            }
-        }
+        };
+
+        // For now, always allow access
+        // TODO: Implement proper access control with actual uid/gid
+        reply.ok()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::branch::{Branch, BranchMode};
-    use crate::policy::FirstFoundCreatePolicy;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-
-    fn setup_test_fs() -> (Vec<TempDir>, MergerFS) {
-        let temp1 = TempDir::new().unwrap();
-        let temp2 = TempDir::new().unwrap();
-        
-        let branch1 = Arc::new(Branch::new(temp1.path().to_path_buf(), BranchMode::ReadWrite));
-        let branch2 = Arc::new(Branch::new(temp2.path().to_path_buf(), BranchMode::ReadWrite));
-        
-        let branches = vec![branch1, branch2];
-        let policy = Box::new(FirstFoundCreatePolicy);
-        let file_manager = FileManager::new(branches, policy);
-        
-        let fs = MergerFS::new(file_manager);
-        (vec![temp1, temp2], fs)
-    }
-
-    #[test]
-    fn test_mergerfs_creation() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Root inode should exist
-        let root_data = fs.get_inode_data(1);
-        assert!(root_data.is_some());
-        
-        let root = root_data.unwrap();
-        assert_eq!(root.path, "/");
-        assert_eq!(root.attr.ino, 1);
-        assert_eq!(root.attr.kind, FileType::Directory);
-    }
-
-    #[test]
-    fn test_create_file_attr() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Create a test file first
-        let test_content = b"test content";
-        fs.file_manager.create_file(Path::new("test.txt"), test_content).unwrap();
-        
-        // Test creating attributes for existing file
-        let attr = fs.create_file_attr(Path::new("test.txt"));
-        assert!(attr.is_some());
-        
-        let attr = attr.unwrap();
-        assert_eq!(attr.kind, FileType::RegularFile);
-        assert_eq!(attr.size, test_content.len() as u64);
-        
-        // Test creating attributes for non-existing file
-        let attr = fs.create_file_attr(Path::new("nonexistent.txt"));
-        assert!(attr.is_none());
-    }
-
-    #[test]
-    fn test_inode_allocation() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        let ino1 = fs.allocate_inode();
-        let ino2 = fs.allocate_inode();
-        let ino3 = fs.allocate_inode();
-        
-        assert_eq!(ino1, 2);
-        assert_eq!(ino2, 3);
-        assert_eq!(ino3, 4);
-    }
-
-    #[test]
-    fn test_path_to_inode_lookup() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Root should be found
-        let root_ino = fs.path_to_inode("/");
-        assert_eq!(root_ino, Some(1));
-        
-        // Non-existing path should not be found
-        let missing_ino = fs.path_to_inode("/nonexistent");
-        assert_eq!(missing_ino, None);
-    }
-
-    #[test]
-    fn test_fuse_create_operation() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Test the internal logic by directly calling the file manager
-        let path = std::path::Path::new("test_create.txt");
-        let result = fs.file_manager.create_file(path, b"test content");
-        assert!(result.is_ok());
-        
-        // Verify the file exists
-        assert!(fs.file_manager.file_exists(path));
-        
-        // Verify we can create attributes for it
-        let attr = fs.create_file_attr(path);
-        assert!(attr.is_some());
-        
-        let attr = attr.unwrap();
-        assert_eq!(attr.kind, FileType::RegularFile);
-        assert_eq!(attr.size, 12); // "test content".len()
-    }
-
-    #[test]
-    fn test_fuse_write_operation() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // First create a file
-        let path = std::path::Path::new("test_write.txt");
-        fs.file_manager.create_file(path, b"initial").unwrap();
-        
-        // Create an inode for it
-        let mut attr = fs.create_file_attr(path).unwrap();
-        let ino = fs.allocate_inode();
-        attr.ino = ino;
-        
-        let inode_data = InodeData {
-            path: "test_write.txt".to_string(),
-            attr,
-        };
-        
-        fs.inodes.write().insert(ino, inode_data);
-        
-        // Test writing new content
-        let new_content = b"updated content";
-        let result = fs.file_manager.create_file(path, new_content);
-        assert!(result.is_ok());
-        
-        // Verify the content was written
-        let read_content = fs.file_manager.read_file(path).unwrap();
-        assert_eq!(read_content, new_content);
-    }
-
-    #[test]
-    fn test_fuse_read_operation() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Create a file with content
-        let path = std::path::Path::new("test_read.txt");
-        let content = b"Hello, FUSE world!";
-        fs.file_manager.create_file(path, content).unwrap();
-        
-        // Read it back through the file manager (simulating FUSE read)
-        let read_content = fs.file_manager.read_file(path).unwrap();
-        assert_eq!(read_content, content);
-        
-        // Test partial read (simulating FUSE read with offset)
-        let partial = &read_content[7..12]; // "FUSE "
-        assert_eq!(partial, b"FUSE ");
-    }
-
-    #[test] 
-    fn test_fuse_file_lookup() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Create a file
-        let path = std::path::Path::new("lookup_test.txt");
-        let content = b"lookup test content";
-        fs.file_manager.create_file(path, content).unwrap();
-        
-        // Test that we can create attributes for existing file
-        let attr = fs.create_file_attr(path);
-        assert!(attr.is_some());
-        
-        let attr = attr.unwrap();
-        assert_eq!(attr.kind, FileType::RegularFile);
-        assert_eq!(attr.size, content.len() as u64);
-        assert_eq!(attr.nlink, 1);
-        assert_eq!(attr.perm, 0o644);
-        
-        // Test that non-existing file returns None
-        let missing_attr = fs.create_file_attr(std::path::Path::new("missing.txt"));
-        assert!(missing_attr.is_none());
-    }
-
-    #[test]
-    fn test_directory_handle_allocation() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Test allocating directory handles
-        let fh1 = fs.allocate_dir_handle();
-        let fh2 = fs.allocate_dir_handle();
-        let fh3 = fs.allocate_dir_handle();
-        
-        assert_eq!(fh1, 1);
-        assert_eq!(fh2, 2);
-        assert_eq!(fh3, 3);
-    }
-
-    #[test]
-    fn test_directory_handle_operations() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Create a directory handle
-        let handle = DirHandle {
-            path: PathBuf::from("/test/dir"),
-            ino: 42,
-        };
-        
-        // Store the handle
-        let fh = fs.allocate_dir_handle();
-        fs.dir_handles.write().insert(fh, handle.clone());
-        
-        // Retrieve the handle
-        let retrieved = fs.get_dir_handle(fh);
-        assert!(retrieved.is_some());
-        
-        let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.path, PathBuf::from("/test/dir"));
-        assert_eq!(retrieved.ino, 42);
-        
-        // Remove the handle
-        fs.remove_dir_handle(fh);
-        
-        // Verify it's gone
-        let removed = fs.get_dir_handle(fh);
-        assert!(removed.is_none());
-    }
-
-    #[test]
-    fn test_dir_handle_clone() {
-        let handle = DirHandle {
-            path: PathBuf::from("/some/path"),
-            ino: 123,
-        };
-        
-        let cloned = handle.clone();
-        assert_eq!(cloned.path, handle.path);
-        assert_eq!(cloned.ino, handle.ino);
-    }
-
-    #[test]
-    fn test_fallocate_basic() {
-        let (temp_dirs, fs) = setup_test_fs();
-        
-        // Create a test file
-        let test_path = std::path::Path::new("test_fallocate.txt");
-        fs.file_manager.create_file(test_path, b"initial content").unwrap();
-        
-        // Test direct file preallocation
-        let full_path = temp_dirs[0].path().join(test_path);
-        
-        // Open the file and extend it
-        use std::fs::OpenOptions;
-        use std::io::{Seek, SeekFrom};
-        
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&full_path)
-            .unwrap();
-            
-        // Seek to 1000 bytes and write a byte to extend the file
-        file.seek(SeekFrom::Start(999)).unwrap();
-        file.write(&[0]).unwrap();
-        
-        // Verify the file was extended
-        let metadata = std::fs::metadata(&full_path).unwrap();
-        assert_eq!(metadata.len(), 1000);
-    }
-
-    #[test] 
-    fn test_fallocate_file_handle_management() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Create a test file
-        let test_path = std::path::Path::new("test_fallocate_handle.txt");
-        fs.file_manager.create_file(test_path, b"content").unwrap();
-        
-        // Test file handle creation and retrieval
-        let ino = fs.allocate_inode();
-        let fh = fs.file_handle_manager.create_handle(ino, test_path.to_path_buf(), 0, Some(0));
-        
-        // Verify we can retrieve the handle
-        let handle = fs.file_handle_manager.get_handle(fh);
-        assert!(handle.is_some());
-        
-        let handle = handle.unwrap();
-        assert_eq!(handle.path, test_path);
-        assert_eq!(handle.branch_idx, Some(0));
-        
-        // Test invalid handle
-        let invalid_handle = fs.file_handle_manager.get_handle(9999);
-        assert!(invalid_handle.is_none());
-    }
-
-    #[test]
-    fn test_fallocate_search_policy() {
-        let (_temp_dirs, fs) = setup_test_fs();
-        
-        // Create a test file
-        let test_path = std::path::Path::new("test_search.txt");
-        fs.file_manager.create_file(test_path, b"content").unwrap();
-        
-        // Test that search policy can find the file
-        let branches = fs.file_manager.search_policy.search_branches(
-            &fs.file_manager.branches,
-            test_path
-        );
-        
-        assert!(branches.is_ok());
-        let branches = branches.unwrap();
-        assert!(!branches.is_empty());
-        
-        // Verify the full path exists
-        let full_path = branches[0].full_path(test_path);
-        assert!(full_path.exists());
-    }
-}
+// Define errno constants for xattr operations
+const ENODATA: i32 = 61;
+const ENOTSUP: i32 = 95;

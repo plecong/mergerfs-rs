@@ -17,24 +17,29 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from contextlib import contextmanager
 import psutil
+# Define wait_for_operation fallback first
+def wait_for_operation(check_fn, timeout=5.0, interval=0.1, operation_name="operation"):
+    import time
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if check_fn():
+            return True, time.time() - start_time
+        time.sleep(interval)
+    return False, time.time() - start_time
+
 try:
     from .timing_utils import (
-        wait_for_operation, FuseLogCapture, FuseTraceMonitor, 
+        wait_for_operation as _wait_for_operation, FuseLogCapture, FuseTraceMonitor, 
         SmartWaitHelper, wait_for_path_operation
     )
+    # Override with imported version if available
+    wait_for_operation = _wait_for_operation
 except ImportError:
     # Fallback if timing_utils is not available
     FuseLogCapture = None
     FuseTraceMonitor = None
     SmartWaitHelper = None
-    def wait_for_operation(check_fn, timeout=5.0, interval=0.1, operation_name="operation"):
-        import time
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if check_fn():
-                return True, time.time() - start_time
-            time.sleep(interval)
-        return False, time.time() - start_time
+    wait_for_path_operation = None
 
 # Try to import the simpler trace monitor as fallback
 try:

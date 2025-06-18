@@ -29,8 +29,6 @@ pub use create::{
 pub use search::{
     FirstFoundSearchPolicy,
 };
-pub use search::all::AllSearchPolicy;
-pub use search::newest::NewestSearchPolicy;
 
 /// Create a policy instance from its name
 pub fn create_policy_from_name(name: &str) -> Option<Box<dyn CreatePolicy>> {

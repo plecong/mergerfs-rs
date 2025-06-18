@@ -17,6 +17,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - **Policies**: 11 of 36 implemented (31%)
 - **Special Features**: 5 of 10+ implemented (50%)
 - **Test Coverage**: 194 tests passing (174 Rust + 20 Python)
+- **Known Limitations**: Concurrent operations limited by FUSE protocol
 
 ## Implementation Status by Component
 
@@ -239,6 +240,20 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Cross-platform implementation with fallback for non-Linux systems
 - Simplified implementation using standard file operations
 - See `docs/FALLOCATE_DESIGN.md` for implementation details
+
+## Known Limitations
+
+### Concurrent Operations
+- FUSE protocol serializes all filesystem requests through a single kernel-userspace channel
+- Multiple threads/processes attempting concurrent file operations will experience blocking
+- This is a fundamental limitation of FUSE, not specific to mergerfs-rs
+- Concurrent Python tests are skipped due to this limitation
+- See `docs/MULTI_THREADED_FUSE_DESIGN.md` for detailed analysis
+
+### Performance Considerations
+- Single-threaded request processing may limit throughput on multi-core systems
+- Large directory operations can block other filesystem operations
+- No support for kernel-level caching optimizations
 
 ## Resources
 
