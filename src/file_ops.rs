@@ -272,6 +272,21 @@ impl FileManager {
         
         tracing::info!("Creating hard link {:?} -> {:?} in branch {:?}", source_path, link_path, branch.path);
         
+        // Check if using path-preserving policy
+        if self.create_policy.is_path_preserving() {
+            // In path-preserving mode, if the parent directory doesn't exist on the same branch,
+            // return EXDEV instead of trying to create it
+            if let Some(parent) = full_link_path.parent() {
+                if !parent.exists() {
+                    tracing::debug!("Parent directory doesn't exist on same branch, returning EXDEV");
+                    return Err(PolicyError::from(std::io::Error::new(
+                        std::io::ErrorKind::CrossesDevices,
+                        "Cross-device link not permitted"
+                    )));
+                }
+            }
+        }
+        
         // Find a branch that has the parent directory to use as template for cloning
         let parent_path = link_path.parent().unwrap_or_else(|| Path::new("/"));
         let template_branch = self.find_first_branch(parent_path).ok();

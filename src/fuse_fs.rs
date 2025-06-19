@@ -53,8 +53,7 @@ pub struct MergerFS {
     next_inode: std::sync::atomic::AtomicU64,
     dir_handles: parking_lot::RwLock<HashMap<u64, DirHandle>>,
     next_dir_handle: std::sync::atomic::AtomicU64,
-    // Cache for path to inode lookups to reduce lock contention
-    path_cache: parking_lot::RwLock<HashMap<String, u64>>,
+    // Removed path_cache - we calculate inodes on-demand to support hard links
     // Fast-path cache for root inode (always inode 1)
     root_inode_cache: InodeData,
 }
@@ -64,6 +63,8 @@ pub struct InodeData {
     pub path: String,
     pub attr: FileAttr,
     pub content_lock: Arc<parking_lot::RwLock<()>>, // Guards file content operations
+    pub branch_idx: Option<usize>, // Which branch this inode belongs to
+    pub original_ino: u64, // Original inode from filesystem
 }
 
 impl MergerFS {
@@ -120,10 +121,11 @@ impl MergerFS {
             path: "/".to_string(),
             attr: root_attr,
             content_lock: Arc::new(parking_lot::RwLock::new(())),
+            branch_idx: None, // Root doesn't belong to a specific branch
+            original_ino: 1, // Root inode
         });
         
-        let mut path_cache = HashMap::new();
-        path_cache.insert("/".to_string(), 1);
+        // No path cache needed - we calculate inodes on-demand
         
         let moveonenospc_handler = MoveOnENOSPCHandler::new(config.clone());
         
@@ -143,7 +145,6 @@ impl MergerFS {
             next_inode: std::sync::atomic::AtomicU64::new(2), // Start at 2, 1 is root
             dir_handles: parking_lot::RwLock::new(HashMap::new()),
             next_dir_handle: std::sync::atomic::AtomicU64::new(1),
-            path_cache: parking_lot::RwLock::new(path_cache),
             root_inode_cache,
         }
     }
@@ -173,30 +174,21 @@ impl MergerFS {
     }
 
     pub fn path_to_inode(&self, path: &str) -> Option<u64> {
-        // Check cache first
-        if let Some(&ino) = self.path_cache.read().get(path) {
-            return Some(ino);
-        }
-        
-        // If not in cache, search in inodes
-        let found_inode = {
-            let inodes = self.inodes.read();
-            inodes.iter()
-                .find(|(_, data)| data.path == path)
-                .map(|(&ino, _)| ino)
-        };
-        
-        // Update cache if found (no locks held during this)
-        if let Some(ino) = found_inode {
-            self.path_cache.write().insert(path.to_string(), ino);
-        }
-        
-        found_inode
+        // Search in existing inodes
+        let inodes = self.inodes.read();
+        inodes.iter()
+            .find(|(_, data)| data.path == path)
+            .map(|(&ino, _)| ino)
     }
 
     pub fn create_file_attr(&self, path: &Path) -> Option<FileAttr> {
+        self.create_file_attr_with_branch(path).map(|(attr, _, _)| attr)
+    }
+    
+    pub fn create_file_attr_with_branch(&self, path: &Path) -> Option<(FileAttr, usize, u64)> {
         // Find the file and get both branch and metadata
         let (branch, metadata) = self.file_manager.find_file_with_metadata(path)?;
+        let branch_idx = self.file_manager.branches.iter().position(|b| b.path == branch.path)?;
         
         let now = SystemTime::now();
         
@@ -235,7 +227,7 @@ impl MergerFS {
         let config = self.config_manager.config().read();
         let calculated_ino = config.inodecalc.calc(&branch.path, path, mode, original_ino);
 
-        Some(FileAttr {
+        let attr = FileAttr {
             ino: calculated_ino,
             size,
             blocks: (size + 511) / 512, // Round up to nearest block
@@ -251,7 +243,9 @@ impl MergerFS {
             rdev: 0,
             flags: 0,
             blksize: 512,
-        })
+        };
+        
+        Some((attr, branch_idx, original_ino))
     }
 
     pub fn store_dir_handle(&self, fh: u64, path: PathBuf, ino: u64) {
@@ -270,15 +264,15 @@ impl MergerFS {
         self.dir_handles.write().remove(&fh);
     }
     
-    fn insert_inode(&self, ino: u64, path: String, attr: FileAttr) {
+    fn insert_inode(&self, ino: u64, path: String, attr: FileAttr, branch_idx: Option<usize>, original_ino: u64) {
         // Insert into inode map first
         self.inodes.write().insert(ino, InodeData { 
             path: path.clone(), 
             attr,
             content_lock: Arc::new(parking_lot::RwLock::new(())),
+            branch_idx,
+            original_ino,
         });
-        // Then update cache separately to avoid holding multiple locks
-        self.path_cache.write().insert(path, ino);
     }
     
     fn remove_inode(&self, ino: u64) {
@@ -287,10 +281,6 @@ impl MergerFS {
             let mut inodes = self.inodes.write();
             inodes.remove(&ino).map(|data| data.path)
         };
-        
-        if let Some(path) = path {
-            self.path_cache.write().remove(&path);
-        }
     }
     
     fn update_cached_paths_after_rename(&self, old_path: &str, new_path: &str) {
@@ -324,18 +314,11 @@ impl MergerFS {
         
         // Update the paths
         let mut inodes = self.inodes.write();
-        let mut path_cache = self.path_cache.write();
         
         for (ino, new_full_path) in inodes_to_update {
             if let Some(inode_data) = inodes.get_mut(&ino) {
-                // Remove old path from cache
-                path_cache.remove(&inode_data.path);
-                
                 // Update to new path
                 inode_data.path = new_full_path.clone();
-                
-                // Add new path to cache
-                path_cache.insert(new_full_path, ino);
             }
         }
     }
@@ -401,23 +384,38 @@ impl Filesystem for MergerFS {
             return;
         }
 
-        // Check if we already have this inode
-        if let Some(ino) = self.path_to_inode(&child_path) {
-            if let Some(data) = self.get_inode_data(ino) {
-                reply.entry(&TTL, &data.attr, 0);
-                return;
-            }
-        }
-
         // Try to create attributes for this path
         let path = Path::new(&child_path);
         
         // Try to create attributes (check if file/dir exists)
-        if let Some(attr) = self.create_file_attr(path) {
+        if let Some((attr, branch_idx, original_ino)) = self.create_file_attr_with_branch(path) {
             let ino = attr.ino; // Use the calculated inode
-
-            self.insert_inode(ino, child_path, attr);
-            reply.entry(&TTL, &attr, 0);
+            
+            // Check if this inode already exists (hard link case)
+            let mut inodes = self.inodes.write();
+            if !inodes.contains_key(&ino) {
+                // New inode, insert it
+                inodes.insert(ino, InodeData {
+                    path: child_path.clone(),
+                    attr,
+                    content_lock: Arc::new(parking_lot::RwLock::new(())),
+                    branch_idx: Some(branch_idx),
+                    original_ino,
+                });
+            } else {
+                // Existing inode (hard link) - update attributes to get fresh nlink
+                if let Some(inode_data) = inodes.get_mut(&ino) {
+                    inode_data.attr.nlink = attr.nlink;
+                    inode_data.attr.size = attr.size;
+                    inode_data.attr.mtime = attr.mtime;
+                    inode_data.attr.ctime = attr.ctime;
+                }
+            }
+            drop(inodes);
+            
+            // Return the attributes (now updated)
+            let inode_data = self.get_inode_data(ino).unwrap();
+            reply.entry(&TTL, &inode_data.attr, 0);
         } else {
             reply.error(ENOENT);
         }
@@ -800,17 +798,11 @@ impl Filesystem for MergerFS {
             Ok(_) => {
                 tracing::info!("File created successfully at {:?}", file_path);
                 // Create file attributes (no locks held during I/O)
-                if let Some(attr) = self.create_file_attr(path) {
+                if let Some((attr, branch_idx, original_ino)) = self.create_file_attr_with_branch(path) {
                     let ino = attr.ino; // Use the calculated inode
 
                     // Insert inode with minimal lock time
-                    self.insert_inode(ino, file_path.clone(), attr);
-                    
-                    // Create a file handle for the newly created file
-                    // Find which branch the file was created on
-                    let branch_idx = self.file_manager.branches.iter().position(|branch| {
-                        branch.full_path(path).exists()
-                    });
+                    self.insert_inode(ino, file_path.clone(), attr, Some(branch_idx), original_ino);
                     
                     // Determine if we should use direct I/O
                     let direct_io = self.config.read().should_use_direct_io();
@@ -819,7 +811,7 @@ impl Filesystem for MergerFS {
                         ino,
                         PathBuf::from(&file_path),
                         flags,
-                        branch_idx,
+                        Some(branch_idx),
                         direct_io
                     );
                     
@@ -1187,11 +1179,11 @@ impl Filesystem for MergerFS {
             Ok(_) => {
                 tracing::info!("Directory created successfully at {:?}", dir_path);
                 // Create directory attributes (no locks held during I/O)
-                if let Some(attr) = self.create_file_attr(path) {
+                if let Some((attr, branch_idx, original_ino)) = self.create_file_attr_with_branch(path) {
                     let ino = attr.ino; // Use the calculated inode
 
                     // Insert inode with minimal lock time
-                    self.insert_inode(ino, dir_path, attr);
+                    self.insert_inode(ino, dir_path, attr, Some(branch_idx), original_ino);
                     reply.entry(&TTL, &attr, 0);
                 } else {
                     reply.error(EIO);
@@ -1326,10 +1318,10 @@ impl Filesystem for MergerFS {
         }
         
         // Update cached attributes
-        if let Some(mut new_attr) = self.create_file_attr(path) {
+        if let Some((mut new_attr, branch_idx, original_ino)) = self.create_file_attr_with_branch(path) {
             new_attr.ino = ino;
             let path_str = data.path.clone();
-            self.insert_inode(ino, path_str, new_attr);
+            self.insert_inode(ino, path_str, new_attr, Some(branch_idx), original_ino);
             reply.attr(&TTL, &new_attr);
         } else {
             reply.error(EIO);
@@ -1828,19 +1820,42 @@ impl Filesystem for MergerFS {
         match self.file_manager.create_hard_link(source_path, &link_path) {
             Ok(()) => {
                 // Get metadata for the link
-                if let Some(attr) = self.create_file_attr(&link_path) {
+                if let Some((attr, branch_idx, original_ino)) = self.create_file_attr_with_branch(&link_path) {
                     // Use the calculated inode - for devino-hash modes, hard links will share inodes
                     let link_ino = attr.ino;
 
-                    // The nlink count comes from the underlying filesystem
-                    // Don't modify it as it already reflects the correct count
+                    // Check if this inode already exists (should be the case for hard links with devino-hash)
+                    let mut inodes = self.inodes.write();
+                    if !inodes.contains_key(&link_ino) {
+                        // New inode (shouldn't happen with devino-hash for hard links)
+                        tracing::warn!("Hard link created new inode {} - expected to share with source", link_ino);
+                        inodes.insert(link_ino, InodeData {
+                            path: link_path_str.clone(),
+                            attr,
+                            content_lock: Arc::new(parking_lot::RwLock::new(())),
+                            branch_idx: Some(branch_idx),
+                            original_ino,
+                        });
+                        drop(inodes);
+                    } else {
+                        // Existing inode - refresh attributes to get updated nlink
+                        tracing::info!("Hard link shares inode {} with source", link_ino);
+                        if let Some((fresh_attr, _, _)) = self.create_file_attr_with_branch(&link_path) {
+                            // Update the cached attributes with fresh nlink count
+                            if let Some(inode_data) = inodes.get_mut(&link_ino) {
+                                inode_data.attr.nlink = fresh_attr.nlink;
+                                inode_data.attr.mtime = fresh_attr.mtime;
+                                inode_data.attr.ctime = fresh_attr.ctime;
+                            }
+                        }
+                        drop(inodes);
+                    }
 
-                    // Insert the new inode
-                    self.insert_inode(link_ino, link_path_str.clone(), attr);
+                    // Get the inode data (which has been updated)
+                    let inode_data = self.get_inode_data(link_ino).unwrap();
+                    tracing::info!("Hard link created successfully: {:?} (inode {}, nlink={})", link_path, link_ino, inode_data.attr.nlink);
 
-                    tracing::info!("Hard link created successfully: {:?} (inode {})", link_path, link_ino);
-
-                    reply.entry(&TTL, &attr, 0);
+                    reply.entry(&TTL, &inode_data.attr, 0);
                 } else {
                     tracing::error!("Failed to get attributes for new link");
                     reply.error(EIO);
