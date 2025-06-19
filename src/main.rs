@@ -8,6 +8,7 @@ mod file_handle;
 mod xattr;
 mod fuse_fs;
 mod fs_utils;
+mod inode;
 mod integration_tests;
 mod fuse_integration_tests;
 mod directory_ops_tests;
@@ -27,6 +28,8 @@ mod rename_edge_case_tests;
 mod symlink_tests;
 #[cfg(test)]
 mod link_tests;
+#[cfg(test)]
+mod inode_integration_test;
 
 use std::env;
 use std::path::PathBuf;

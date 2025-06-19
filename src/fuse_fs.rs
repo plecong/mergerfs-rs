@@ -17,6 +17,7 @@ use fuser::{
 const ENOENT: i32 = 2;
 const EIO: i32 = 5;
 const EACCES: i32 = 13;
+const EEXIST: i32 = 17;
 const ENOTDIR: i32 = 20;
 const EINVAL: i32 = 22;
 const EROFS: i32 = 30;
@@ -194,8 +195,8 @@ impl MergerFS {
     }
 
     pub fn create_file_attr(&self, path: &Path) -> Option<FileAttr> {
-        // Get metadata without following symlinks
-        let metadata = self.file_manager.get_metadata(path)?;
+        // Find the file and get both branch and metadata
+        let (branch, metadata) = self.file_manager.find_file_with_metadata(path)?;
         
         let now = SystemTime::now();
         
@@ -217,11 +218,25 @@ impl MergerFS {
         #[cfg(not(unix))]
         let perm = if metadata.permissions().readonly() { 0o444 } else { 0o644 };
         
-        let nlink = if metadata.is_dir() { 2 } else { 1 };
+        #[cfg(unix)]
+        let (nlink, mode, original_ino) = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.nlink() as u32, metadata.mode(), metadata.ino())
+        };
+        #[cfg(not(unix))]
+        let (nlink, mode, original_ino) = {
+            let mode = if metadata.is_dir() { 0o040755 } else { 0o100644 };
+            (if metadata.is_dir() { 2 } else { 1 }, mode, 0u64)
+        };
+        
         let size = metadata.len();
+        
+        // Calculate inode using the configured algorithm
+        let config = self.config_manager.config().read();
+        let calculated_ino = config.inodecalc.calc(&branch.path, path, mode, original_ino);
 
         Some(FileAttr {
-            ino: 0, // Will be set by caller
+            ino: calculated_ino,
             size,
             blocks: (size + 511) / 512, // Round up to nearest block
             atime: metadata.accessed().unwrap_or(now),
@@ -398,9 +413,8 @@ impl Filesystem for MergerFS {
         let path = Path::new(&child_path);
         
         // Try to create attributes (check if file/dir exists)
-        if let Some(mut attr) = self.create_file_attr(path) {
-            let ino = self.allocate_inode();
-            attr.ino = ino;
+        if let Some(attr) = self.create_file_attr(path) {
+            let ino = attr.ino; // Use the calculated inode
 
             self.insert_inode(ino, child_path, attr);
             reply.entry(&TTL, &attr, 0);
@@ -438,8 +452,33 @@ impl Filesystem for MergerFS {
 
         match self.get_inode_data(ino) {
             Some(data) => {
-                tracing::info!("Returning attr for inode {}: size={}, path={}", ino, data.attr.size, data.path);
-                reply.attr(&TTL, &data.attr)
+                // Refresh attributes from filesystem to get current nlink count
+                let path = Path::new(&data.path);
+                if let Some(fresh_attr) = self.create_file_attr(path) {
+                    // The fresh_attr should have the same calculated inode
+                    // Verify consistency - if not, use the cached inode
+                    let updated_attr = if fresh_attr.ino != ino {
+                        tracing::warn!("Inode mismatch for {}: cached={}, calculated={}", data.path, ino, fresh_attr.ino);
+                        let mut attr = fresh_attr;
+                        attr.ino = ino; // Keep the cached inode for consistency
+                        attr
+                    } else {
+                        fresh_attr
+                    };
+                    
+                    // Update the cached inode data
+                    if let Some(inode_data) = self.inodes.write().get_mut(&ino) {
+                        inode_data.attr = updated_attr;
+                    }
+                    
+                    tracing::info!("Returning fresh attr for inode {}: size={}, nlink={}, path={}", 
+                                  ino, updated_attr.size, updated_attr.nlink, data.path);
+                    reply.attr(&TTL, &updated_attr);
+                } else {
+                    // If we can't refresh, return cached data
+                    tracing::warn!("Could not refresh attributes for {}, returning cached", data.path);
+                    reply.attr(&TTL, &data.attr);
+                }
             },
             None => reply.error(ENOENT),
         }
@@ -629,7 +668,7 @@ impl Filesystem for MergerFS {
         // Get directory path and verify it's a directory without holding locks
         let dir_path = {
             // Get the directory path from the handle or inode
-            let path = if fh > 0 {
+            let _path = if fh > 0 {
                 match self.get_dir_handle(fh) {
                     Some(handle) => handle.path.to_string_lossy().to_string(),
                     None => {
@@ -688,22 +727,14 @@ impl Filesystem for MergerFS {
                         format!("{}/{}", dir_path, entry_name)
                     };
                     
-                    // Determine if it's a file or directory by checking any branch
-                    let mut file_type = FileType::RegularFile;
-                    for branch in &self.file_manager.branches {
-                        let full_path = branch.full_path(Path::new(&entry_path));
-                        if full_path.exists() {
-                            if full_path.is_dir() {
-                                file_type = FileType::Directory;
-                            }
-                            break; // Found it in one branch, that's enough
-                        }
+                    // Get file attributes to determine type and calculate inode
+                    let entry_path_obj = Path::new(&entry_path);
+                    if let Some(attr) = self.create_file_attr(entry_path_obj) {
+                        entries.push((attr.ino, attr.kind, entry_name));
+                    } else {
+                        // Skip entries we can't stat
+                        tracing::warn!("Could not get attributes for directory entry: {}", entry_path);
                     }
-                    
-                    // Use a dummy inode for now - in a real implementation we'd
-                    // need to track these properly
-                    let dummy_ino = 2; // Not ideal, but works for basic functionality
-                    entries.push((dummy_ino, file_type, entry_name));
                 }
             }
             Err(e) => {
@@ -769,9 +800,8 @@ impl Filesystem for MergerFS {
             Ok(_) => {
                 tracing::info!("File created successfully at {:?}", file_path);
                 // Create file attributes (no locks held during I/O)
-                if let Some(mut attr) = self.create_file_attr(path) {
-                    let ino = self.allocate_inode();
-                    attr.ino = ino;
+                if let Some(attr) = self.create_file_attr(path) {
+                    let ino = attr.ino; // Use the calculated inode
 
                     // Insert inode with minimal lock time
                     self.insert_inode(ino, file_path.clone(), attr);
@@ -1157,9 +1187,8 @@ impl Filesystem for MergerFS {
             Ok(_) => {
                 tracing::info!("Directory created successfully at {:?}", dir_path);
                 // Create directory attributes (no locks held during I/O)
-                if let Some(mut attr) = self.create_file_attr(path) {
-                    let ino = self.allocate_inode();
-                    attr.ino = ino;
+                if let Some(attr) = self.create_file_attr(path) {
+                    let ino = attr.ino; // Use the calculated inode
 
                     // Insert inode with minimal lock time
                     self.insert_inode(ino, dir_path, attr);
@@ -1740,6 +1769,99 @@ impl Filesystem for MergerFS {
         // This is intentional as directory sync is handled by underlying filesystems
         tracing::debug!("fsyncdir not implemented, returning ENOSYS");
         reply.error(ENOSYS);
+    }
+
+    fn link(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let _span = tracing::info_span!("fuse::link", ino, newparent, newname = ?newname).entered();
+        tracing::info!("Creating hard link");
+
+        // Get source inode data
+        let source_data = match self.get_inode_data(ino) {
+            Some(data) => data,
+            None => {
+                tracing::error!("Source inode not found: {}", ino);
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Verify source is a regular file (hard links to directories not allowed)
+        if source_data.attr.kind != FileType::RegularFile {
+            tracing::error!("Cannot create hard link to non-regular file");
+            reply.error(EINVAL);
+            return;
+        }
+
+        // Get parent directory data
+        let parent_data = match self.get_inode_data(newparent) {
+            Some(data) => data,
+            None => {
+                tracing::error!("Parent directory inode not found: {}", newparent);
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Verify parent is a directory
+        if parent_data.attr.kind != FileType::Directory {
+            tracing::error!("Parent is not a directory");
+            reply.error(ENOTDIR);
+            return;
+        }
+
+        // Construct paths
+        let source_path = Path::new(&source_data.path);
+        let parent_path = Path::new(&parent_data.path);
+        let link_path = parent_path.join(newname);
+        let link_path_str = link_path.to_string_lossy().to_string();
+
+        tracing::debug!("Creating hard link from {:?} to {:?}", source_path, link_path);
+
+        // Create the hard link using FileManager
+        match self.file_manager.create_hard_link(source_path, &link_path) {
+            Ok(()) => {
+                // Get metadata for the link
+                if let Some(attr) = self.create_file_attr(&link_path) {
+                    // Use the calculated inode - for devino-hash modes, hard links will share inodes
+                    let link_ino = attr.ino;
+
+                    // The nlink count comes from the underlying filesystem
+                    // Don't modify it as it already reflects the correct count
+
+                    // Insert the new inode
+                    self.insert_inode(link_ino, link_path_str.clone(), attr);
+
+                    tracing::info!("Hard link created successfully: {:?} (inode {})", link_path, link_ino);
+
+                    reply.entry(&TTL, &attr, 0);
+                } else {
+                    tracing::error!("Failed to get attributes for new link");
+                    reply.error(EIO);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create hard link: {}", e);
+                match e {
+                    crate::policy::PolicyError::NoBranchesAvailable => reply.error(ENOENT),
+                    crate::policy::PolicyError::IoError(ref io_err) => {
+                        match io_err.kind() {
+                            std::io::ErrorKind::PermissionDenied => reply.error(EACCES),
+                            std::io::ErrorKind::NotFound => reply.error(ENOENT),
+                            std::io::ErrorKind::AlreadyExists => reply.error(EEXIST),
+                            _ => reply.error(EIO),
+                        }
+                    }
+                    _ => reply.error(EIO),
+                }
+            }
+        }
     }
 }
 

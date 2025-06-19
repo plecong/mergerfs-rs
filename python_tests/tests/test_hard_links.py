@@ -10,7 +10,6 @@ import shutil
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Hard link FUSE operation not implemented - backend ready but FUSE link() missing")
 class TestHardLinks:
     """Test hard link creation and behavior."""
     

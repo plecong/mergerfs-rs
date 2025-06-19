@@ -13,7 +13,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 24 of 40+ implemented (60%)
+- **FUSE Operations**: 25 of 40+ implemented (63%)
 - **Policies**: 11 of 36 implemented (31%)
 - **Special Features**: 3 of 10+ fully implemented (30%)
 - **Test Coverage**: 
@@ -47,8 +47,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Alpine Linux/MUSL compatibility (no libc dependency)
 - [x] Permission checking utilities for access control
 - [x] Comprehensive tracing/logging infrastructure for all FUSE operations
+- [x] Inode calculation algorithms (all 7 modes: passthrough, path-hash, devino-hash, hybrid-hash, and 32-bit variants)
 
-#### FUSE Operations (24/40+)
+#### FUSE Operations (25/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -73,6 +74,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `releasedir` - Release directory handle
 - [x] `fallocate` - Preallocate file space (basic implementation)
 - [x] `fsyncdir` - Sync directory (returns ENOSYS, matching C++ behavior)
+- [x] `link` - Create hard links (basic implementation)
 
 #### Policies (11/36)
 **Create Policies (9/16)**:
@@ -124,8 +126,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ### ❌ Not Implemented
 
-#### FUSE Operations (19+)
-- Hard links: `link` (backend implemented, FUSE operation missing)
+#### FUSE Operations (18+)
 - Special files: `mknod` (backend implemented, FUSE operation missing)
 - Directory sync: `fsyncdir`
 - Advanced I/O: `poll`, `ftruncate`, `copy_file_range`
@@ -196,7 +197,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 2. **Error Aggregation**: Simple error handling compared to C++ version
 3. **Memory Usage**: No memory pooling or optimization
 4. **Compatibility**: Some edge cases may differ from C++ mergerfs
-5. **Missing FUSE Operations**: 
+5. **Hard Link Inode Caching**: While inode calculation correctly generates shared inodes for hard links in devino-hash modes, the FUSE layer's path-to-inode cache assumes 1:1 mapping, causing hard links to appear with different inodes to applications
+6. **Runtime Inode Mode Changes**: Changing inodecalc mode at runtime doesn't invalidate cached inodes
+7. **Missing FUSE Operations**: 
    - `link` operation not implemented (causes hard link test failures)
    - `mknod` operation not implemented (causes special file test failures)
 6. **Incomplete Features**:
@@ -306,10 +309,10 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ## Next Steps
 
 1. **High Priority (Fix Test Failures)**:
-   - **Implement FUSE `link` operation** for hard link support
-     - Backend implementation exists in `src/hard_link_ops.rs`
-     - Need to add `link` handler in `src/fuse_fs.rs`
-     - Unskip `tests/test_hard_links.py` when complete
+   - ✅ **FUSE `link` operation implemented** (4/10 tests passing)
+     - Basic hard link functionality working
+     - Some edge cases and cross-branch tests still failing
+     - Partial unskip of `tests/test_hard_links.py`
    
    - **Implement FUSE `mknod` operation** for special file support
      - Backend implementation exists in `src/special_files.rs`

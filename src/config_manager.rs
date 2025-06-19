@@ -85,6 +85,11 @@ impl ConfigManager {
             Box::new(CacheFilesOption::new(config.clone())),
         );
         
+        options.insert(
+            "inodecalc".to_string(),
+            Box::new(InodeCalcOption::new(config.clone())),
+        );
+        
         // Read-only options
         options.insert(
             "version".to_string(),
@@ -147,6 +152,11 @@ impl ConfigManager {
             }
             None => Err(ConfigError::NotFound),
         }
+    }
+    
+    /// Get access to the underlying config
+    pub fn config(&self) -> &ConfigRef {
+        &self.config
     }
 }
 
@@ -353,6 +363,43 @@ impl ConfigOption for CacheFilesOption {
     
     fn help(&self) -> &str {
         "File caching behavior (libfuse|off|partial|full|auto-full|per-process)"
+    }
+}
+
+/// Inode calculation algorithm configuration option
+struct InodeCalcOption {
+    config: ConfigRef,
+}
+
+impl InodeCalcOption {
+    fn new(config: ConfigRef) -> Self {
+        Self { config }
+    }
+}
+
+impl ConfigOption for InodeCalcOption {
+    fn name(&self) -> &str {
+        "inodecalc"
+    }
+    
+    fn get_value(&self) -> String {
+        self.config.read().inodecalc.to_string().to_string()
+    }
+    
+    fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
+        use crate::inode::InodeCalc;
+        
+        match InodeCalc::from_str(value) {
+            Ok(mode) => {
+                self.config.write().inodecalc = mode;
+                Ok(())
+            }
+            Err(e) => Err(ConfigError::InvalidValue(e)),
+        }
+    }
+    
+    fn help(&self) -> &str {
+        "Inode calculation algorithm (passthrough|path-hash|path-hash32|devino-hash|devino-hash32|hybrid-hash|hybrid-hash32)"
     }
 }
 

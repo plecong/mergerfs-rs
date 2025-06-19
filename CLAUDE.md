@@ -162,7 +162,7 @@ All 80+ tests pass on Alpine Linux environments. The implementation avoids glibc
 
 ## Development Guidelines
 
-- When adding a new feature or change, compare the new feature or change in Rust with the current C++ implementation found under `refs/mergerfs-original`
+- Always review the C++ implementation as a reference before making any changes to the Rust implementation.
 
 ## Development Process for New Features
 

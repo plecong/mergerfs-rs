@@ -12,7 +12,7 @@ pub use traits::{ActionPolicy, CreatePolicy, SearchPolicy};
 // Re-export all policy implementations
 pub use action::AllActionPolicy;
 pub use action::existing_path_all::ExistingPathAllActionPolicy;
-pub use action::existing_path_first_found::ExistingPathFirstFoundActionPolicy;
+// pub use action::existing_path_first_found::ExistingPathFirstFoundActionPolicy;
 
 pub use create::{
     FirstFoundCreatePolicy,

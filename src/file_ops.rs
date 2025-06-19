@@ -151,6 +151,18 @@ impl FileManager {
             branch.full_path(path).exists()
         })
     }
+    
+    /// Find the branch that contains a file and return both the branch and metadata
+    pub fn find_file_with_metadata(&self, path: &Path) -> Option<(&Branch, std::fs::Metadata)> {
+        for branch in &self.branches {
+            let full_path = branch.full_path(path);
+            // Get metadata without following symlinks
+            if let Ok(metadata) = full_path.symlink_metadata() {
+                return Some((branch, metadata));
+            }
+        }
+        None
+    }
 
     pub fn create_directory(&self, path: &Path) -> Result<(), PolicyError> {
         let branch = self.create_policy.select_branch(&self.branches, path)?;

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
+use crate::inode::InodeCalc;
 
 pub type ConfigRef = Arc<RwLock<Config>>;
 
@@ -84,6 +85,7 @@ pub struct Config {
     pub cache_files: CacheFiles,
     pub direct_io_allow_mmap: bool,
     pub parallel_direct_writes: bool,
+    pub inodecalc: InodeCalc,
 }
 
 impl Default for Config {
@@ -98,6 +100,7 @@ impl Default for Config {
             cache_files: CacheFiles::default(),
             direct_io_allow_mmap: false,
             parallel_direct_writes: false,
+            inodecalc: InodeCalc::default(),
         }
     }
 }
