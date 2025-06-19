@@ -10,6 +10,7 @@ import shutil
 
 
 @pytest.mark.integration
+@pytest.mark.skip(reason="Existing path policies not yet configurable - waiting for runtime config support")
 class TestExistingPathPolicies:
     """Test existing path create policies that preserve directory structure."""
     

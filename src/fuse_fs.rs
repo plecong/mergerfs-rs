@@ -1,5 +1,5 @@
 use crate::config::{ConfigRef, StatFSIgnore};
-use crate::policy::AllActionPolicy;
+use crate::policy::{AllActionPolicy, ExistingPathAllActionPolicy};
 use crate::policy::error::PolicyError;
 use crate::file_ops::FileManager;
 use crate::metadata_ops::MetadataManager;
@@ -69,14 +69,14 @@ impl MergerFS {
     pub fn new(file_manager: FileManager) -> Self {
         // Create metadata manager with same branches and AllActionPolicy for consistency
         let branches = file_manager.branches.clone();
-        let action_policy = Box::new(AllActionPolicy);
+        let action_policy = Box::new(ExistingPathAllActionPolicy::new());
         let metadata_manager = MetadataManager::new(branches.clone(), action_policy);
         
         // Create xattr manager with search and action policies
         let xattr_manager = XattrManager::new(
             branches.clone(),
             Box::new(FirstFoundSearchPolicy),
-            Box::new(AllActionPolicy::new()),
+            Box::new(ExistingPathAllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(AllActionPolicy::new()),
         );
@@ -86,7 +86,7 @@ impl MergerFS {
         // Create rename manager with appropriate policies
         let rename_manager = RenameManager::new(
             branches,
-            Box::new(AllActionPolicy),
+            Box::new(ExistingPathAllActionPolicy::new()),
             Box::new(FirstFoundSearchPolicy),
             Box::new(FirstFoundCreatePolicy::new()),
             config.clone(),
@@ -275,6 +275,53 @@ impl MergerFS {
         
         if let Some(path) = path {
             self.path_cache.write().remove(&path);
+        }
+    }
+    
+    fn update_cached_paths_after_rename(&self, old_path: &str, new_path: &str) {
+        // We need to update all cached inodes whose paths start with old_path
+        let old_path_with_slash = if old_path.ends_with('/') {
+            old_path.to_string()
+        } else {
+            format!("{}/", old_path)
+        };
+        
+        // Collect inodes to update (to avoid holding locks during updates)
+        let inodes_to_update: Vec<(u64, String)> = {
+            let inodes = self.inodes.read();
+            inodes.iter()
+                .filter_map(|(ino, data)| {
+                    // Check if this path is a child of the renamed directory
+                    if data.path.starts_with(&old_path_with_slash) {
+                        // Calculate new path
+                        let relative_path = &data.path[old_path_with_slash.len()..];
+                        let new_full_path = format!("{}/{}", new_path, relative_path);
+                        Some((*ino, new_full_path))
+                    } else if data.path == old_path {
+                        // The directory itself
+                        Some((*ino, new_path.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        
+        // Update the paths
+        let mut inodes = self.inodes.write();
+        let mut path_cache = self.path_cache.write();
+        
+        for (ino, new_full_path) in inodes_to_update {
+            if let Some(inode_data) = inodes.get_mut(&ino) {
+                // Remove old path from cache
+                path_cache.remove(&inode_data.path);
+                
+                // Update to new path
+                inode_data.path = new_full_path.clone();
+                
+                // Add new path to cache
+                path_cache.insert(new_full_path, ino);
+            }
         }
     }
 }
@@ -1319,17 +1366,10 @@ impl Filesystem for MergerFS {
         match self.rename_manager.rename(Path::new(&old_path), Path::new(&new_path)) {
             Ok(_) => {
                 tracing::info!("Rename successful: {:?} -> {:?}", old_path, new_path);
-                // Update inode cache if the old path was cached
-                if let Some(ino) = self.path_to_inode(&old_path) {
-                    // Get the old inode data
-                    if let Some(mut inode_data) = self.get_inode_data(ino) {
-                        // Remove old entry
-                        self.remove_inode(ino);
-                        // Update path and reinsert
-                        inode_data.path = new_path;
-                        self.insert_inode(ino, inode_data.path, inode_data.attr);
-                    }
-                }
+                
+                // Update inode cache - this handles both files and directories
+                self.update_cached_paths_after_rename(&old_path, &new_path);
+                
                 reply.ok();
             }
             Err(e) => {

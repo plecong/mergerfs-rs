@@ -13,7 +13,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Overall Progress
 
-- **FUSE Operations**: 26 of 40+ implemented (65%)
+- **FUSE Operations**: 24 of 40+ implemented (60%)
 - **Policies**: 11 of 36 implemented (31%)
 - **Special Features**: 5 of 10+ implemented (50%)
 - **Test Coverage**: 194 tests passing (174 Rust + 20 Python)
@@ -32,7 +32,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Permission checking utilities for access control
 - [x] Comprehensive tracing/logging infrastructure for all FUSE operations
 
-#### FUSE Operations (26/40+)
+#### FUSE Operations (24/40+)
 - [x] `lookup` - Find files/directories
 - [x] `getattr` - Get file attributes
 - [x] `setattr` - Set file attributes (chmod, chown, truncate, utimens)
@@ -52,9 +52,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] `rename` - Rename files and directories (with multi-branch support)
 - [x] `symlink` - Create symbolic links (with path cloning)
 - [x] `readlink` - Read symbolic links
-- [x] `link` - Create hard links (basic functionality, no EXDEV handling)
 - [x] `access` - Check file permissions
-- [x] `mknod` - Create special files (FIFOs, devices, sockets)
 - [x] `opendir` - Open directory handle
 - [x] `releasedir` - Release directory handle
 - [x] `fallocate` - Preallocate file space (basic implementation)
@@ -107,7 +105,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ### ❌ Not Implemented
 
-#### FUSE Operations (17+)
+#### FUSE Operations (19+)
+- Hard links: `link` (backend implemented, FUSE operation missing)
+- Special files: `mknod` (backend implemented, FUSE operation missing)
 - Directory sync: `fsyncdir`
 - Advanced I/O: `poll`, `ftruncate`, `copy_file_range`
 - Locking: `lock`, `flock`
@@ -164,9 +164,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Branch management (readonly, readwrite)
 - ✅ Extended attributes (xattr)
 - ✅ Symbolic links (creation and reading)
-- ✅ Hard links (basic functionality)
 - ✅ Access permission checking
-- ✅ Special files (FIFOs/named pipes)
+- ❌ Hard links (backend ready, FUSE operation not implemented)
+- ❌ Special files (backend ready, FUSE operation not implemented)
 - ✅ Runtime configuration (via xattr)
 - ✅ Trace-based timing (eliminates flaky tests, 78% faster execution)
 
@@ -176,6 +176,8 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 2. **Error Aggregation**: Simple error handling compared to C++ version
 3. **Memory Usage**: No memory pooling or optimization
 4. **Compatibility**: Some edge cases may differ from C++ mergerfs
+5. **Missing FUSE Operations**: `link` and `mknod` operations not implemented in FUSE layer despite backend support
+6. **Test Failures**: Python tests for hard links and special files fail due to missing FUSE operations
 
 ## Development Guidelines
 
