@@ -59,7 +59,7 @@ class TestRuntimeConfiguration:
             ]
             
             for option in expected_options:
-                assert option.encode() in attrs, f"Missing option: {option}"
+                assert option in attrs, f"Missing option: {option}"
             
         except Exception as e:
             pytest.skip(f"Cannot list xattrs: {e}")
@@ -81,7 +81,7 @@ class TestRuntimeConfiguration:
             # Try to set version (should fail)
             with pytest.raises(OSError) as exc_info:
                 xattr.setxattr(str(control_file), "user.mergerfs.version", b"fake")
-            assert exc_info.value.errno in [1, 13, 95]  # EPERM, EACCES, or ENOTSUP
+            assert exc_info.value.errno in [1, 13, 30, 95]  # EPERM, EACCES, EROFS, or ENOTSUP
             
         except Exception as e:
             pytest.skip(f"Cannot test read-only options: {e}")

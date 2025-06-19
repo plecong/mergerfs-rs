@@ -197,7 +197,7 @@ impl ConfigManager {
         // Validate policy name and create the policy
         let policy = create_policy_from_name(value)
             .ok_or_else(|| ConfigError::InvalidValue(format!(
-                "Unknown create policy: {}. Valid options: ff, mfs, lfs, lus, rand, epmfs, eplfs, pfrd",
+                "Unknown create policy: {}. Valid options: ff, mfs, lfs, lus, rand, epff, epmfs, eplfs, pfrd",
                 value
             )))?;
         
@@ -256,12 +256,12 @@ impl ConfigOption for CreatePolicyOption {
     fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
         // Just validate and store the value - actual policy update is handled by ConfigManager
         match value {
-            "ff" | "mfs" | "lfs" | "lus" | "rand" | "epmfs" | "eplfs" | "pfrd" => {
+            "ff" | "mfs" | "lfs" | "lus" | "rand" | "epff" | "epmfs" | "eplfs" | "pfrd" => {
                 *self.current_value.write() = value.to_string();
                 Ok(())
             }
             _ => Err(ConfigError::InvalidValue(format!(
-                "Unknown create policy: {}. Valid options: ff, mfs, lfs, lus, rand, epmfs, eplfs, pfrd",
+                "Unknown create policy: {}. Valid options: ff, mfs, lfs, lus, rand, epff, epmfs, eplfs, pfrd",
                 value
             ))),
         }
@@ -311,7 +311,7 @@ impl ConfigOption for MoveOnENOSPCOption {
                 Ok(())
             }
             // Check if it's a valid policy name
-            "ff" | "mfs" | "lfs" | "lus" | "rand" | "epmfs" | "eplfs" | "pfrd" => {
+            "ff" | "mfs" | "lfs" | "lus" | "rand" | "epff" | "epmfs" | "eplfs" | "pfrd" => {
                 config.moveonenospc.enabled = true;
                 config.moveonenospc.policy_name = value.to_string();
                 Ok(())
