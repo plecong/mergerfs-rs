@@ -75,9 +75,14 @@ impl ConfigManager {
             Box::new(BooleanOption::new(
                 "direct_io",
                 false, // default
-                "Force direct I/O for all files",
+                "Force direct I/O for all files (deprecated, use cache.files)",
                 config.clone(),
             )),
+        );
+        
+        options.insert(
+            "cache.files".to_string(),
+            Box::new(CacheFilesOption::new(config.clone())),
         );
         
         // Read-only options
@@ -298,6 +303,59 @@ impl ConfigOption for BooleanOption {
     }
 }
 
+/// Cache files configuration option
+struct CacheFilesOption {
+    config: ConfigRef,
+}
+
+impl CacheFilesOption {
+    fn new(config: ConfigRef) -> Self {
+        Self { config }
+    }
+}
+
+impl ConfigOption for CacheFilesOption {
+    fn name(&self) -> &str {
+        "cache.files"
+    }
+    
+    fn get_value(&self) -> String {
+        use crate::config::CacheFiles;
+        match self.config.read().cache_files {
+            CacheFiles::Libfuse => "libfuse".to_string(),
+            CacheFiles::Off => "off".to_string(),
+            CacheFiles::Partial => "partial".to_string(),
+            CacheFiles::Full => "full".to_string(),
+            CacheFiles::AutoFull => "auto-full".to_string(),
+            CacheFiles::PerProcess => "per-process".to_string(),
+        }
+    }
+    
+    fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
+        use crate::config::CacheFiles;
+        let cache_mode = match value.to_lowercase().as_str() {
+            "libfuse" => CacheFiles::Libfuse,
+            "off" => CacheFiles::Off,
+            "partial" => CacheFiles::Partial,
+            "full" => CacheFiles::Full,
+            "auto-full" => CacheFiles::AutoFull,
+            "per-process" => CacheFiles::PerProcess,
+            _ => return Err(ConfigError::InvalidValue(format!("Invalid cache.files value: {}", value))),
+        };
+        
+        self.config.write().cache_files = cache_mode;
+        Ok(())
+    }
+    
+    fn is_readonly(&self) -> bool {
+        false
+    }
+    
+    fn help(&self) -> &str {
+        "File caching behavior (libfuse|off|partial|full|auto-full|per-process)"
+    }
+}
+
 /// Read-only option that returns a fixed value
 struct ReadOnlyOption {
     name: String,
@@ -390,6 +448,34 @@ mod tests {
         assert!(manager.set_option("moveonenospc", "invalid").is_err());
     }
     
+    #[test]
+    fn test_cache_files_option() {
+        let config = config::create_config();
+        let manager = ConfigManager::new(config);
+        
+        // Test default value
+        assert_eq!(manager.get_option("cache.files").unwrap(), "libfuse");
+        
+        // Test setting valid values
+        assert!(manager.set_option("cache.files", "off").is_ok());
+        assert_eq!(manager.get_option("cache.files").unwrap(), "off");
+        
+        assert!(manager.set_option("cache.files", "partial").is_ok());
+        assert_eq!(manager.get_option("cache.files").unwrap(), "partial");
+        
+        assert!(manager.set_option("cache.files", "full").is_ok());
+        assert_eq!(manager.get_option("cache.files").unwrap(), "full");
+        
+        assert!(manager.set_option("cache.files", "auto-full").is_ok());
+        assert_eq!(manager.get_option("cache.files").unwrap(), "auto-full");
+        
+        assert!(manager.set_option("cache.files", "per-process").is_ok());
+        assert_eq!(manager.get_option("cache.files").unwrap(), "per-process");
+        
+        // Test invalid values
+        assert!(manager.set_option("cache.files", "invalid").is_err());
+    }
+
     #[test]
     fn test_readonly_option() {
         let config = config::create_config();

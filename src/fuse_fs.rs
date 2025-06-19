@@ -416,10 +416,20 @@ impl Filesystem for MergerFS {
                         Err(_) => None, // File doesn't exist in any branch
                     };
                     
-                    // Create file handle
-                    let fh = self.file_handle_manager.create_handle(ino, PathBuf::from(&data.path), flags, branch_idx);
+                    // Determine if we should use direct I/O
+                    let direct_io = self.config.read().should_use_direct_io();
                     
-                    reply.opened(fh, flags as u32);
+                    // Create file handle
+                    let fh = self.file_handle_manager.create_handle(ino, PathBuf::from(&data.path), flags, branch_idx, direct_io);
+                    
+                    // Set reply flags based on direct I/O setting
+                    let mut reply_flags = flags as u32;
+                    if direct_io {
+                        // Set FOPEN_DIRECT_IO flag in the reply
+                        reply_flags |= 0x00000001; // FOPEN_DIRECT_IO
+                    }
+                    
+                    reply.opened(fh, reply_flags);
                 } else {
                     // Not a regular file
                     reply.error(EINVAL);
@@ -725,17 +735,28 @@ impl Filesystem for MergerFS {
                         branch.full_path(path).exists()
                     });
                     
+                    // Determine if we should use direct I/O
+                    let direct_io = self.config.read().should_use_direct_io();
+                    
                     let fh = self.file_handle_manager.create_handle(
                         ino,
                         PathBuf::from(&file_path),
                         flags,
-                        branch_idx
+                        branch_idx,
+                        direct_io
                     );
                     
-                    tracing::debug!("Created file handle {} for new file {:?}", fh, file_path);
+                    tracing::debug!("Created file handle {} for new file {:?} (direct_io: {})", fh, file_path, direct_io);
+                    
+                    // Set reply flags based on direct I/O setting
+                    let mut reply_flags = flags as u32;
+                    if direct_io {
+                        // Set FOPEN_DIRECT_IO flag in the reply
+                        reply_flags |= 0x00000001; // FOPEN_DIRECT_IO
+                    }
                     
                     // Return the file handle in the reply
-                    reply.created(&TTL, &attr, 0, fh, flags as u32);
+                    reply.created(&TTL, &attr, 0, fh, reply_flags);
                 } else {
                     reply.error(EIO);
                 }
@@ -1383,7 +1404,35 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            reply.error(ENOTSUP);
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(EINVAL);
+                    return;
+                }
+            };
+            
+            // Handle config option getxattr
+            if name_str.starts_with("user.mergerfs.") {
+                let option_name = &name_str["user.mergerfs.".len()..];
+                match self.config_manager.get_option(option_name) {
+                    Ok(value) => {
+                        let value_bytes = value.as_bytes();
+                        if size == 0 {
+                            reply.size(value_bytes.len() as u32);
+                        } else if size < value_bytes.len() as u32 {
+                            reply.error(ERANGE);
+                        } else {
+                            reply.data(value_bytes);
+                        }
+                    }
+                    Err(_) => {
+                        reply.error(ENOTSUP);
+                    }
+                }
+            } else {
+                reply.error(ENOTSUP);
+            }
             return;
         }
 
@@ -1431,7 +1480,36 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            reply.error(ENOTSUP);
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(EINVAL);
+                    return;
+                }
+            };
+            
+            // Handle config option setxattr
+            if name_str.starts_with("user.mergerfs.") {
+                let option_name = &name_str["user.mergerfs.".len()..];
+                let value_str = match std::str::from_utf8(value) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        reply.error(EINVAL);
+                        return;
+                    }
+                };
+                
+                match self.config_manager.set_option(option_name, value_str) {
+                    Ok(()) => {
+                        reply.ok();
+                    }
+                    Err(e) => {
+                        reply.error(e.errno());
+                    }
+                }
+            } else {
+                reply.error(ENOTSUP);
+            }
             return;
         }
 
@@ -1480,10 +1558,21 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
+            // List all available config options
+            let options = self.config_manager.list_options();
+            let mut buffer = Vec::new();
+            
+            for option in options {
+                buffer.extend_from_slice(option.as_bytes());
+                buffer.push(0); // null terminator
+            }
+            
             if size == 0 {
-                reply.size(0);
+                reply.size(buffer.len() as u32);
+            } else if size < buffer.len() as u32 {
+                reply.error(ERANGE);
             } else {
-                reply.data(&[]);
+                reply.data(&buffer);
             }
             return;
         }

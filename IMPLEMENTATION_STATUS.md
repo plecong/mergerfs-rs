@@ -88,6 +88,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Configuration system (StatFS modes)
 - [x] Comprehensive Python integration tests with Hypothesis
 - [x] moveonenospc - Automatic file migration on ENOSPC/EDQUOT
+- [x] Direct I/O support - cache.files configuration with multiple caching modes
 
 ### 🚧 In Progress / High Priority
 
@@ -102,7 +103,7 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - [x] Search policy integration into FUSE operations (basic file search)
 - [x] moveonenospc - Move files when out of space (COMPLETED)
 - [x] Path preservation for "existing path" policies (epff implemented)
-- [ ] Direct I/O support
+- [x] Direct I/O support - cache.files configuration with libfuse/off/partial/full/auto-full/per-process modes
 
 ### ❌ Not Implemented
 
@@ -241,6 +242,13 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - Simplified implementation using standard file operations
 - See `docs/FALLOCATE_DESIGN.md` for implementation details
 
+### Direct I/O Support
+- Implements cache.files configuration option with multiple caching modes
+- Supports libfuse, off (direct I/O), partial, full, auto-full, and per-process modes
+- Sets FOPEN_DIRECT_IO flag appropriately on open/create operations
+- Configurable at runtime via xattr interface
+- See `docs/DIRECT_IO_DESIGN.md` and `docs/DIRECT_IO_IMPLEMENTATION_PLAN.md` for details
+
 ## Known Limitations
 
 ### Concurrent Operations
@@ -264,11 +272,11 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Implement fsyncdir for directory synchronization
-2. Add direct I/O support
-3. Implement remaining existing path create policies (eprand, eplus, eppfrd)
-4. Implement most shared path policies (msp* variants)
-5. Add ftruncate operation support
+1. Implement remaining existing path create policies (eprand, eplus, eppfrd)
+2. Implement most shared path policies (msp* variants)
+3. Add ftruncate operation support
+4. Implement file locking (lock, flock)
+5. Add performance optimizations (caching, readdir_plus)
 
 ---
 

@@ -42,6 +42,22 @@ impl Default for RenameEXDEV {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CacheFiles {
+    Libfuse,    // Use libfuse default (always cache)
+    Off,        // Disable caching (direct_io)
+    Partial,    // Cache writes but not reads
+    Full,       // Enable full caching
+    AutoFull,   // Like full but disables cache for specific processes
+    PerProcess, // Process-specific caching
+}
+
+impl Default for CacheFiles {
+    fn default() -> Self {
+        CacheFiles::Libfuse
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MoveOnENOSPC {
     pub enabled: bool,
@@ -65,6 +81,9 @@ pub struct Config {
     pub ignore_path_preserving_on_rename: bool,
     pub rename_exdev: RenameEXDEV,
     pub moveonenospc: MoveOnENOSPC,
+    pub cache_files: CacheFiles,
+    pub direct_io_allow_mmap: bool,
+    pub parallel_direct_writes: bool,
 }
 
 impl Default for Config {
@@ -76,7 +95,22 @@ impl Default for Config {
             ignore_path_preserving_on_rename: false,
             rename_exdev: RenameEXDEV::default(),
             moveonenospc: MoveOnENOSPC::default(),
+            cache_files: CacheFiles::default(),
+            direct_io_allow_mmap: false,
+            parallel_direct_writes: false,
         }
+    }
+}
+
+impl Config {
+    /// Determine if direct I/O should be used based on cache.files setting
+    pub fn should_use_direct_io(&self) -> bool {
+        matches!(self.cache_files, CacheFiles::Off)
+    }
+    
+    /// Determine if kernel cache should be enabled
+    pub fn should_enable_kernel_cache(&self) -> bool {
+        matches!(self.cache_files, CacheFiles::Full | CacheFiles::AutoFull | CacheFiles::PerProcess)
     }
 }
 

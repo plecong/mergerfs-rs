@@ -4,6 +4,7 @@ mod fuse_integration_tests {
     use crate::file_ops::FileManager;
     use crate::fuse_fs::MergerFS;
     use crate::policy::{FirstFoundCreatePolicy, MostFreeSpaceCreatePolicy, LeastFreeSpaceCreatePolicy};
+    use crate::config::create_config;
     use serial_test::serial;
     use std::path::Path;
     use std::sync::Arc;
@@ -874,7 +875,8 @@ mod fuse_integration_tests {
             ino,
             test_path.to_path_buf(),
             flags,
-            Some(0) // Branch 0
+            Some(0), // Branch 0
+            false // direct_io
         );
         assert_eq!(fs.file_handle_manager.get_handle_count(), 1);
         
@@ -883,7 +885,8 @@ mod fuse_integration_tests {
             ino,
             test_path.to_path_buf(),
             flags,
-            Some(0) // Same branch
+            Some(0), // Same branch
+            false // direct_io
         );
         assert_ne!(fh1, fh2, "Each open should get unique handle");
         assert_eq!(fs.file_handle_manager.get_handle_count(), 2);
@@ -929,14 +932,16 @@ mod fuse_integration_tests {
             2,
             test_path.to_path_buf(),
             0,
-            Some(0) // Branch 0
+            Some(0), // Branch 0
+            false // direct_io
         );
         
         let fh_branch2 = fs.file_handle_manager.create_handle(
             2,
             test_path.to_path_buf(),
             0,
-            Some(1) // Branch 1
+            Some(1), // Branch 1
+            false // direct_io
         );
         
         // Verify handles track their branches
@@ -949,6 +954,48 @@ mod fuse_integration_tests {
         // Clean up
         fs.file_handle_manager.remove_handle(fh_branch1);
         fs.file_handle_manager.remove_handle(fh_branch2);
+    }
+
+    #[test]
+    fn test_direct_io_configuration() {
+        let temp_dir = TempDir::new().unwrap();
+        let branch1 = temp_dir.path().join("branch1");
+        let mountpoint = temp_dir.path().join("mountpoint");
+        
+        std::fs::create_dir(&branch1).unwrap();
+        std::fs::create_dir(&mountpoint).unwrap();
+        
+        let branches = vec![Arc::new(Branch::new(branch1.clone(), BranchMode::ReadWrite))];
+        let config = create_config();
+        
+        // Test default is libfuse (no direct I/O)
+        {
+            let cfg = config.read();
+            assert!(!cfg.should_use_direct_io());
+            assert!(!cfg.should_enable_kernel_cache());
+        }
+        
+        // Test cache.files = off enables direct I/O
+        {
+            use crate::config::CacheFiles;
+            config.write().cache_files = CacheFiles::Off;
+        }
+        {
+            let cfg = config.read();
+            assert!(cfg.should_use_direct_io());
+            assert!(!cfg.should_enable_kernel_cache());
+        }
+        
+        // Test cache.files = full enables kernel cache
+        {
+            use crate::config::CacheFiles;
+            config.write().cache_files = CacheFiles::Full;
+        }
+        {
+            let cfg = config.read();
+            assert!(!cfg.should_use_direct_io());
+            assert!(cfg.should_enable_kernel_cache());
+        }
     }
 
     #[test]
