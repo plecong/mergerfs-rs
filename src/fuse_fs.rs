@@ -1595,6 +1595,23 @@ impl Filesystem for MergerFS {
         // TODO: Implement proper access control with actual uid/gid
         reply.ok()
     }
+
+    fn fsyncdir(&mut self, _req: &Request, ino: u64, fh: u64, datasync: bool, reply: fuser::ReplyEmpty) {
+        let _span = tracing::debug_span!("fuse::fsyncdir", ino, fh, datasync).entered();
+        tracing::debug!("Starting fsyncdir");
+
+        // Verify the directory handle exists
+        if self.get_dir_handle(fh).is_none() {
+            tracing::warn!("fsyncdir called with invalid file handle: {}", fh);
+            reply.error(EINVAL);
+            return;
+        }
+
+        // Match the C++ implementation behavior - always return ENOSYS
+        // This is intentional as directory sync is handled by underlying filesystems
+        tracing::debug!("fsyncdir not implemented, returning ENOSYS");
+        reply.error(ENOSYS);
+    }
 }
 
 // Define errno constants for xattr operations
