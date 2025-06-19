@@ -87,10 +87,10 @@ class FuseManager:
         release_path = base_dir / "target" / "release" / "mergerfs-rs"
         debug_path = base_dir / "target" / "debug" / "mergerfs-rs"
         
-        if release_path.exists():
-            return release_path
-        elif debug_path.exists():
+        if debug_path.exists():
             return debug_path
+        elif release_path.exists():
+            return release_path
         else:
             raise FileNotFoundError(
                 f"Could not find mergerfs-rs binary. Tried:\n"

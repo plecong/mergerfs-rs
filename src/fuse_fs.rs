@@ -230,7 +230,27 @@ impl MergerFS {
         } else if metadata.is_symlink() {
             FileType::Symlink
         } else {
-            FileType::RegularFile
+            // Check for special file types on Unix platforms
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                let ft = metadata.file_type();
+                if ft.is_fifo() {
+                    FileType::NamedPipe
+                } else if ft.is_char_device() {
+                    FileType::CharDevice
+                } else if ft.is_block_device() {
+                    FileType::BlockDevice
+                } else if ft.is_socket() {
+                    FileType::Socket
+                } else {
+                    FileType::RegularFile
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                FileType::RegularFile
+            }
         };
         
         // Set permissions based on metadata
@@ -1914,6 +1934,86 @@ impl Filesystem for MergerFS {
                     }
                     _ => reply.error(EIO),
                 }
+            }
+        }
+    }
+
+    fn mknod(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        let name_str = name.to_str().unwrap_or("<invalid>");
+        let _span = tracing::info_span!(
+            "fuse::mknod", 
+            parent, 
+            name = %name_str, 
+            mode = %format!("{:o}", mode), 
+            umask = %format!("{:o}", umask), 
+            rdev = %rdev
+        ).entered();
+        tracing::debug!("Starting mknod operation");
+
+        // Get parent path without holding lock during file creation
+        let file_path = {
+            let parent_data = match self.get_inode_data(parent) {
+                Some(data) => data,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            let parent_path = parent_data.path.clone();
+            if parent_path == "/" {
+                format!("/{}", name_str)
+            } else {
+                format!("{}/{}", parent_path, name_str)
+            }
+        };
+
+        // Create special file using file manager (no locks held)
+        let path = Path::new(&file_path);
+        tracing::debug!("Creating special file at path: {:?} with mode: {:o}, rdev: {}", file_path, mode, rdev);
+
+        match self.file_manager.create_special_file(path, mode, rdev) {
+            Ok(_) => {
+                tracing::info!("Special file created successfully at {:?}", file_path);
+                // Create file attributes (no locks held during I/O)
+                tracing::debug!("Creating file attributes for newly created special file");
+                if let Some((attr, branch_idx, original_ino)) = self.create_file_attr_with_branch(path) {
+                    let ino = attr.ino; // Use the calculated inode
+                    tracing::debug!("Created attributes for special file: ino={}, kind={:?}", ino, attr.kind);
+
+                    // Insert inode with minimal lock time
+                    self.insert_inode(ino, file_path, attr, Some(branch_idx), original_ino);
+                    tracing::debug!("Inserted inode into cache, sending reply");
+                    reply.entry(&TTL, &attr, 0);
+                    tracing::debug!("Reply sent successfully");
+                } else {
+                    tracing::error!("Failed to create file attributes for special file at {:?}", file_path);
+                    reply.error(EIO);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create special file at {:?}: {:?}", file_path, e);
+                tracing::debug!("Special file creation error details: {:?}", e);
+                let errno = e.errno();
+                tracing::debug!("Returning errno {} for mknod failure", errno);
+                reply.error(errno);
             }
         }
     }

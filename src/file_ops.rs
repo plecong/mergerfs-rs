@@ -426,7 +426,7 @@ impl FileManager {
             }
             
             let full_path = branch.full_path(path);
-            if full_path.exists() && full_path.is_file() {
+            if full_path.exists() && !full_path.is_dir() {
                 found_any = true;
                 match std::fs::remove_file(&full_path) {
                     Ok(_) => {}, // Success

@@ -116,6 +116,19 @@ impl MetadataManager {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
+        // Check if parent directory is writable
+        if let Some(parent) = path.parent() {
+            let parent_metadata = fs::metadata(parent)?;
+            let parent_mode = parent_metadata.permissions().mode();
+            // Check if parent directory has write permission for owner/group/other
+            if (parent_mode & 0o200) == 0 && (parent_mode & 0o020) == 0 && (parent_mode & 0o002) == 0 {
+                return Err(PolicyError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Parent directory is read-only"
+                )));
+            }
+        }
+
         let metadata = fs::metadata(path)?;
         let mut permissions = metadata.permissions();
         permissions.set_mode(mode);

@@ -13,7 +13,6 @@ import socket
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Special files FUSE operation not implemented - backend ready but FUSE mknod() missing")
 class TestSpecialFiles:
     """Test creation and handling of special files."""
     
@@ -82,9 +81,13 @@ class TestSpecialFiles:
         assert len(received_data) == 1
         assert received_data[0] == test_data
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['mfs'], indirect=True)
     def test_fifo_with_policies(self, mounted_fs_with_policy):
         """Test FIFO creation with different create policies."""
-        process, mountpoint, branches = mounted_fs_with_policy("mfs")
+        if len(mounted_fs_with_policy) == 4:
+            process, mountpoint, branches, _ = mounted_fs_with_policy
+        else:
+            process, mountpoint, branches = mounted_fs_with_policy
         
         # Add different amounts of data to branches
         (branches[0] / "data0.bin").write_bytes(b'0' * (30 * 1024 * 1024))
@@ -93,16 +96,21 @@ class TestSpecialFiles:
         
         time.sleep(0.2)
         
-        # Create FIFO - should go to branch 1 (most free space)
+        # Create FIFO - should go to branch 2 (most free space)
+        # Branch 0: 100MB - 30MB = 70MB free
+        # Branch 1: 200MB - 10MB = 190MB free  
+        # Branch 2: 500MB - 20MB = 480MB free (most free space)
         fifo_path = mountpoint / "policy.fifo"
         os.mkfifo(fifo_path)
         time.sleep(0.1)
         
         # Verify it's in the expected branch
-        assert (branches[1] / "policy.fifo").exists()
-        assert stat.S_ISFIFO((branches[1] / "policy.fifo").stat().st_mode)
+        assert (branches[2] / "policy.fifo").exists()
+        assert stat.S_ISFIFO((branches[2] / "policy.fifo").stat().st_mode)
+        
+        # Verify it's NOT in the other branches  
         assert not (branches[0] / "policy.fifo").exists()
-        assert not (branches[2] / "policy.fifo").exists()
+        assert not (branches[1] / "policy.fifo").exists()
     
     def test_fifo_permissions(self, mounted_fs):
         """Test FIFO permissions."""
