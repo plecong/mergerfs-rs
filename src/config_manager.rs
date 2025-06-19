@@ -1,6 +1,9 @@
 use crate::config::ConfigRef;
+use crate::file_ops::FileManager;
+use crate::policy::create_policy_from_name;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::any::Any;
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -28,7 +31,7 @@ impl ConfigError {
 }
 
 /// Trait for configuration options that can be get/set at runtime
-pub trait ConfigOption: Send + Sync {
+pub trait ConfigOption: Send + Sync + Any {
     /// Get the option name (e.g., "moveonenospc")
     fn name(&self) -> &str;
     
@@ -52,10 +55,15 @@ pub struct ConfigManager {
     options: Arc<RwLock<HashMap<String, Box<dyn ConfigOption>>>>,
     #[allow(dead_code)]
     config: ConfigRef,
+    file_manager: Weak<FileManager>,
 }
 
 impl ConfigManager {
     pub fn new(config: ConfigRef) -> Self {
+        Self::new_without_file_manager(config)
+    }
+    
+    pub fn new_without_file_manager(config: ConfigRef) -> Self {
         let mut options: HashMap<String, Box<dyn ConfigOption>> = HashMap::new();
         
         // Register all configuration options
@@ -90,6 +98,16 @@ impl ConfigManager {
             Box::new(InodeCalcOption::new(config.clone())),
         );
         
+        options.insert(
+            "statfs".to_string(),
+            Box::new(StatFSModeOption::new(config.clone())),
+        );
+        
+        options.insert(
+            "statfs.ignore".to_string(),
+            Box::new(StatFSIgnoreOption::new(config.clone())),
+        );
+        
         // Read-only options
         options.insert(
             "version".to_string(),
@@ -112,7 +130,22 @@ impl ConfigManager {
         Self {
             options: Arc::new(RwLock::new(options)),
             config,
+            file_manager: Weak::new(),
         }
+    }
+    
+    /// Set the file manager reference for runtime policy updates
+    pub fn set_file_manager(&mut self, file_manager: &Arc<FileManager>) {
+        self.file_manager = Arc::downgrade(file_manager);
+        
+        // Sync the initial policy value with the FileManager's current policy
+        let current_policy_name = file_manager.get_create_policy_name();
+        if let Some(create_option) = self.options.write().get_mut("func.create") {
+            // Update the stored value to match the FileManager's current policy
+            let _ = create_option.set_value(&current_policy_name);
+        }
+        
+        tracing::info!("ConfigManager initialized with FileManager, current policy: {}", current_policy_name);
     }
     
     /// Get all available option names with "user.mergerfs." prefix
@@ -141,6 +174,11 @@ impl ConfigManager {
         // Remove "user.mergerfs." prefix if present
         let name = name.strip_prefix("user.mergerfs.").unwrap_or(name);
         
+        // Special handling for create policy
+        if name == "func.create" {
+            return self.set_create_policy(value);
+        }
+        
         let mut options = self.options.write();
         match options.get_mut(name) {
             Some(option) => {
@@ -152,6 +190,36 @@ impl ConfigManager {
             }
             None => Err(ConfigError::NotFound),
         }
+    }
+    
+    /// Set create policy with file manager update
+    fn set_create_policy(&self, value: &str) -> Result<(), ConfigError> {
+        // Validate policy name and create the policy
+        let policy = create_policy_from_name(value)
+            .ok_or_else(|| ConfigError::InvalidValue(format!(
+                "Unknown create policy: {}. Valid options: ff, mfs, lfs, lus, rand, epmfs, eplfs, pfrd",
+                value
+            )))?;
+        
+        // Update the file manager's policy if available
+        if let Some(file_manager) = self.file_manager.upgrade() {
+            eprintln!("DEBUG: Setting create policy to: {}", value);
+            file_manager.set_create_policy(policy);
+            let new_policy_name = file_manager.get_create_policy_name();
+            eprintln!("DEBUG: FileManager policy after update: {}", new_policy_name);
+            tracing::info!("Updated create policy to: {}", value);
+        } else {
+            eprintln!("DEBUG: FileManager not available for policy update");
+            tracing::warn!("FileManager not available for policy update");
+        }
+        
+        // Update the stored value in the config option
+        let mut options = self.options.write();
+        if let Some(option) = options.get_mut("func.create") {
+            option.set_value(value)?;
+        }
+        
+        Ok(())
     }
     
     /// Get access to the underlying config
@@ -186,12 +254,10 @@ impl ConfigOption for CreatePolicyOption {
     }
     
     fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
-        // Validate policy name
+        // Just validate and store the value - actual policy update is handled by ConfigManager
         match value {
             "ff" | "mfs" | "lfs" | "lus" | "rand" | "epmfs" | "eplfs" | "pfrd" => {
                 *self.current_value.write() = value.to_string();
-                // TODO: Actually update the policy in file_manager
-                // This will require modifying FileManager to support runtime policy changes
                 Ok(())
             }
             _ => Err(ConfigError::InvalidValue(format!(
@@ -552,5 +618,89 @@ mod tests {
         
         // Test invalid policy
         assert!(manager.set_option("func.create", "invalid").is_err());
+    }
+}
+
+/// StatFS mode configuration option
+struct StatFSModeOption {
+    config: ConfigRef,
+}
+
+impl StatFSModeOption {
+    fn new(config: ConfigRef) -> Self {
+        Self { config }
+    }
+}
+
+impl ConfigOption for StatFSModeOption {
+    fn name(&self) -> &str {
+        "statfs"
+    }
+    
+    fn get_value(&self) -> String {
+        use crate::config::StatFSMode;
+        match self.config.read().statfs_mode {
+            StatFSMode::Base => "base".to_string(),
+            StatFSMode::Full => "full".to_string(),
+        }
+    }
+    
+    fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
+        use crate::config::StatFSMode;
+        let mode = match value.to_lowercase().as_str() {
+            "base" => StatFSMode::Base,
+            "full" => StatFSMode::Full,
+            _ => return Err(ConfigError::InvalidValue(format!("Invalid statfs mode: {}", value))),
+        };
+        
+        self.config.write().statfs_mode = mode;
+        Ok(())
+    }
+    
+    fn help(&self) -> &str {
+        "StatFS mode (base|full) - controls how filesystem statistics are reported"
+    }
+}
+
+/// StatFS ignore configuration option
+struct StatFSIgnoreOption {
+    config: ConfigRef,
+}
+
+impl StatFSIgnoreOption {
+    fn new(config: ConfigRef) -> Self {
+        Self { config }
+    }
+}
+
+impl ConfigOption for StatFSIgnoreOption {
+    fn name(&self) -> &str {
+        "statfs.ignore"
+    }
+    
+    fn get_value(&self) -> String {
+        use crate::config::StatFSIgnore;
+        match self.config.read().statfs_ignore {
+            StatFSIgnore::None => "none".to_string(),
+            StatFSIgnore::ReadOnly => "ro".to_string(),
+            StatFSIgnore::NoCreate => "nc".to_string(),
+        }
+    }
+    
+    fn set_value(&mut self, value: &str) -> Result<(), ConfigError> {
+        use crate::config::StatFSIgnore;
+        let ignore = match value.to_lowercase().as_str() {
+            "none" => StatFSIgnore::None,
+            "ro" => StatFSIgnore::ReadOnly,
+            "nc" => StatFSIgnore::NoCreate,
+            _ => return Err(ConfigError::InvalidValue(format!("Invalid statfs.ignore value: {}", value))),
+        };
+        
+        self.config.write().statfs_ignore = ignore;
+        Ok(())
+    }
+    
+    fn help(&self) -> &str {
+        "StatFS ignore mode (none|ro|nc) - which branches to ignore for space calculations"
     }
 }

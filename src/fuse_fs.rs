@@ -7,6 +7,7 @@ use crate::file_handle::FileHandleManager;
 use crate::xattr::{XattrManager, XattrFlags};
 use crate::policy::{FirstFoundSearchPolicy, FirstFoundCreatePolicy};
 use crate::config_manager::ConfigManager;
+use crate::control_file::{ControlFileHandler, CONTROL_FILE_INO};
 use crate::rename_ops::RenameManager;
 use crate::moveonenospc::{MoveOnENOSPCHandler, is_out_of_space_error};
 use fuser::{
@@ -33,7 +34,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::error;
 
 const TTL: Duration = Duration::from_secs(1);
-const CONTROL_FILE_INO: u64 = u64::MAX; // Special inode for /.mergerfs
 
 #[derive(Debug)]
 pub struct DirHandle {
@@ -48,6 +48,7 @@ pub struct MergerFS {
     pub file_handle_manager: Arc<FileHandleManager>,
     pub xattr_manager: Arc<XattrManager>,
     pub config_manager: Arc<ConfigManager>,
+    pub control_file_handler: Arc<ControlFileHandler>,
     pub rename_manager: Arc<RenameManager>,
     pub moveonenospc_handler: Arc<MoveOnENOSPCHandler>,
     inodes: parking_lot::RwLock<HashMap<u64, InodeData>>,
@@ -95,7 +96,7 @@ impl MergerFS {
             config.clone(),
         );
         
-        let config_manager = ConfigManager::new(config.clone());
+        let mut config_manager = ConfigManager::new(config.clone());
         
         let mut inodes = HashMap::new();
         
@@ -133,13 +134,22 @@ impl MergerFS {
         // Clone root inode data for fast-path cache
         let root_inode_cache = inodes.get(&1).unwrap().clone();
         
+        let file_manager_arc = Arc::new(file_manager);
+        
+        // Set up the file manager reference in config manager
+        config_manager.set_file_manager(&file_manager_arc);
+        
+        let config_manager_arc = Arc::new(config_manager);
+        let control_file_handler = Arc::new(ControlFileHandler::new(config_manager_arc.clone()));
+        
         MergerFS {
-            file_manager: Arc::new(file_manager),
+            file_manager: file_manager_arc,
             metadata_manager: Arc::new(metadata_manager),
             config,
             file_handle_manager: Arc::new(FileHandleManager::new()),
             xattr_manager: Arc::new(xattr_manager),
-            config_manager: Arc::new(config_manager),
+            config_manager: config_manager_arc,
+            control_file_handler,
             rename_manager: Arc::new(rename_manager),
             moveonenospc_handler: Arc::new(moveonenospc_handler),
             inodes: parking_lot::RwLock::new(inodes),
@@ -414,24 +424,8 @@ impl Filesystem for MergerFS {
         };
         
         // Handle special control file
-        if child_path == "/.mergerfs" {
-            let attr = FileAttr {
-                ino: CONTROL_FILE_INO,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::RegularFile,
-                perm: 0o444, // Read-only for all
-                nlink: 1,
-                uid: 0, // Owned by root
-                gid: 0,
-                rdev: 0,
-                flags: 0,
-                blksize: 512,
-            };
+        if ControlFileHandler::is_control_file(&child_path) {
+            let attr = self.control_file_handler.get_attr();
             reply.entry(&TTL, &attr, 0);
             return;
         }
@@ -479,24 +473,7 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            let attr = FileAttr {
-                ino: CONTROL_FILE_INO,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::RegularFile,
-                perm: 0o444,
-                nlink: 1,
-                uid: 0,
-                gid: 0,
-                rdev: 0,
-                flags: 0,
-                blksize: 512,
-            };
-            reply.attr(&TTL, &attr);
+            self.control_file_handler.handle_getattr(reply);
             return;
         }
 
@@ -543,6 +520,24 @@ impl Filesystem for MergerFS {
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         let _span = tracing::info_span!("fuse::open", ino, flags).entered();
         tracing::debug!("Starting open");
+
+        // Handle special control file
+        if ino == CONTROL_FILE_INO {
+            match self.control_file_handler.handle_open(flags) {
+                Ok(()) => {
+                    let fh = self.file_handle_manager.create_handle(
+                        ino, 
+                        PathBuf::from("/.mergerfs"), 
+                        flags, 
+                        None,  // No specific branch
+                        false  // No direct I/O
+                    );
+                    reply.opened(fh, 0);
+                }
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
 
         match self.get_inode_data(ino) {
             Some(data) => {
@@ -611,6 +606,12 @@ impl Filesystem for MergerFS {
     ) {
         let _span = tracing::info_span!("fuse::read", ino, fh, offset, size).entered();
         tracing::info!("Starting read operation");
+
+        // Handle special control file
+        if ino == CONTROL_FILE_INO {
+            self.control_file_handler.handle_read(reply);
+            return;
+        }
 
         // Get the content lock for this inode
         let content_lock = match self.get_inode_data(ino) {
@@ -1067,11 +1068,12 @@ impl Filesystem for MergerFS {
                         }).unwrap_or(0)
                     };
                     
+                    let policy_ref = self.file_manager.create_policy.read();
                     match self.moveonenospc_handler.move_file_on_enospc(
                         path,
                         current_branch_idx,
                         &self.file_manager.branches,
-                        self.file_manager.create_policy.as_ref(),
+                        policy_ref.as_ref(),
                         None, // No file descriptor available here
                     ) {
                         Ok(move_result) => {
@@ -1523,35 +1525,7 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-            
-            // Handle config option getxattr
-            if name_str.starts_with("user.mergerfs.") {
-                let option_name = &name_str["user.mergerfs.".len()..];
-                match self.config_manager.get_option(option_name) {
-                    Ok(value) => {
-                        let value_bytes = value.as_bytes();
-                        if size == 0 {
-                            reply.size(value_bytes.len() as u32);
-                        } else if size < value_bytes.len() as u32 {
-                            reply.error(ERANGE);
-                        } else {
-                            reply.data(value_bytes);
-                        }
-                    }
-                    Err(_) => {
-                        reply.error(ENOTSUP);
-                    }
-                }
-            } else {
-                reply.error(ENOTSUP);
-            }
+            self.control_file_handler.handle_getxattr(name, size, reply);
             return;
         }
 
@@ -1599,36 +1573,7 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-            
-            // Handle config option setxattr
-            if name_str.starts_with("user.mergerfs.") {
-                let option_name = &name_str["user.mergerfs.".len()..];
-                let value_str = match std::str::from_utf8(value) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        reply.error(EINVAL);
-                        return;
-                    }
-                };
-                
-                match self.config_manager.set_option(option_name, value_str) {
-                    Ok(()) => {
-                        reply.ok();
-                    }
-                    Err(e) => {
-                        reply.error(e.errno());
-                    }
-                }
-            } else {
-                reply.error(ENOTSUP);
-            }
+            self.control_file_handler.handle_setxattr(name, value, reply);
             return;
         }
 
@@ -1677,22 +1622,7 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            // List all available config options
-            let options = self.config_manager.list_options();
-            let mut buffer = Vec::new();
-            
-            for option in options {
-                buffer.extend_from_slice(option.as_bytes());
-                buffer.push(0); // null terminator
-            }
-            
-            if size == 0 {
-                reply.size(buffer.len() as u32);
-            } else if size < buffer.len() as u32 {
-                reply.error(ERANGE);
-            } else {
-                reply.data(&buffer);
-            }
+            self.control_file_handler.handle_listxattr(size, reply);
             return;
         }
 
@@ -1741,7 +1671,7 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            reply.error(ENOTSUP);
+            self.control_file_handler.handle_removexattr(reply);
             return;
         }
 
@@ -1781,13 +1711,7 @@ impl Filesystem for MergerFS {
 
         // Handle special control file
         if ino == CONTROL_FILE_INO {
-            // Control file is readable for all
-            if mask & 2 != 0 || mask & 4 != 0 {
-                // Write or execute requested
-                reply.error(EACCES);
-            } else {
-                reply.ok();
-            }
+            self.control_file_handler.handle_access(mask, reply);
             return;
         }
 

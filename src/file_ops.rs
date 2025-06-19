@@ -5,12 +5,13 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use parking_lot::RwLock;
 use nix::sys::stat::{mknod as nix_mknod, Mode, SFlag};
 use nix::unistd::mkfifo;
 
 pub struct FileManager {
     pub branches: Vec<Arc<Branch>>,
-    pub create_policy: Box<dyn CreatePolicy>,
+    pub create_policy: Arc<RwLock<Box<dyn CreatePolicy>>>,
     pub search_policy: Box<dyn SearchPolicy>,
 }
 
@@ -19,9 +20,22 @@ impl FileManager {
         use crate::policy::FirstFoundSearchPolicy;
         Self {
             branches,
-            create_policy,
+            create_policy: Arc::new(RwLock::new(create_policy)),
             search_policy: Box::new(FirstFoundSearchPolicy::new()),
         }
+    }
+    
+    /// Update the create policy at runtime
+    pub fn set_create_policy(&self, policy: Box<dyn CreatePolicy>) {
+        let mut create_policy = self.create_policy.write();
+        eprintln!("DEBUG FileManager: Updating policy from {} to {}", create_policy.name(), policy.name());
+        *create_policy = policy;
+    }
+    
+    /// Get the current create policy name
+    pub fn get_create_policy_name(&self) -> String {
+        let policy = self.create_policy.read();
+        policy.name().to_string()
     }
 
     pub fn create_file(&self, path: &Path, content: &[u8]) -> Result<(), PolicyError> {
@@ -29,14 +43,22 @@ impl FileManager {
         
         // Select branch for new file using create policy
         tracing::debug!("Selecting branch for new file using create policy");
-        let branch = self.create_policy.select_branch(&self.branches, path)?;
+        let branch = {
+            let policy = self.create_policy.read();
+            eprintln!("DEBUG FileManager: Using policy {} for creating {:?}", policy.name(), path);
+            policy.select_branch(&self.branches, path)?
+        };
         let full_path = branch.full_path(path);
         
         tracing::info!("Selected branch {:?} for creating file {:?}", branch.path, path);
         tracing::debug!("Full path will be: {:?}", full_path);
         
         // If using a path-preserving policy, clone directory structure from template branch
-        if self.create_policy.is_path_preserving() {
+        let is_path_preserving = {
+            let policy = self.create_policy.read();
+            policy.is_path_preserving()
+        };
+        if is_path_preserving {
             let parent_path = path.parent().unwrap_or_else(|| Path::new("/"));
             let template_branch = self.find_first_branch(parent_path).ok();
             
@@ -165,13 +187,20 @@ impl FileManager {
     }
 
     pub fn create_directory(&self, path: &Path) -> Result<(), PolicyError> {
-        let branch = self.create_policy.select_branch(&self.branches, path)?;
+        let branch = {
+            let policy = self.create_policy.read();
+            policy.select_branch(&self.branches, path)?
+        };
         let full_path = branch.full_path(path);
         
         tracing::info!("Creating directory {:?} in branch {:?}", path, branch.path);
         
         // If using a path-preserving policy, clone directory structure from template branch
-        if self.create_policy.is_path_preserving() {
+        let is_path_preserving = {
+            let policy = self.create_policy.read();
+            policy.is_path_preserving()
+        };
+        if is_path_preserving {
             let parent_path = path.parent().unwrap_or_else(|| Path::new("/"));
             let template_branch = self.find_first_branch(parent_path).ok();
             
@@ -195,7 +224,10 @@ impl FileManager {
     
     pub fn create_symlink(&self, link_path: &Path, target: &Path) -> Result<(), PolicyError> {
         // Select branch for new symlink using create policy
-        let branch = self.create_policy.select_branch(&self.branches, link_path)?;
+        let branch = {
+            let policy = self.create_policy.read();
+            policy.select_branch(&self.branches, link_path)?
+        };
         let full_link_path = branch.full_path(link_path);
         
         tracing::info!("Creating symlink {:?} -> {:?} in branch {:?}", link_path, target, branch.path);
@@ -273,7 +305,11 @@ impl FileManager {
         tracing::info!("Creating hard link {:?} -> {:?} in branch {:?}", source_path, link_path, branch.path);
         
         // Check if using path-preserving policy
-        if self.create_policy.is_path_preserving() {
+        let is_path_preserving = {
+            let policy = self.create_policy.read();
+            policy.is_path_preserving()
+        };
+        if is_path_preserving {
             // In path-preserving mode, if the parent directory doesn't exist on the same branch,
             // return EXDEV instead of trying to create it
             if let Some(parent) = full_link_path.parent() {
@@ -455,7 +491,10 @@ impl FileManager {
         
         // Select branch for new special file using create policy
         tracing::debug!("Selecting branch for new special file using create policy");
-        let branch = self.create_policy.select_branch(&self.branches, path)?;
+        let branch = {
+            let policy = self.create_policy.read();
+            policy.select_branch(&self.branches, path)?
+        };
         let full_path = branch.full_path(path);
         
         tracing::info!("Selected branch {:?} for creating special file {:?}", branch.path, path);
