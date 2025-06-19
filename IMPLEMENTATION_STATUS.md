@@ -20,10 +20,9 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
   - Rust tests: 174 passing
   - Python tests: 
     - Passing: ~130 tests across action policies, MFS, rename, search, runtime config, etc.
-    - Skipped: 5 test files (~50 tests) due to missing features:
+    - Skipped: 4 test files (~40 tests) due to missing features:
       - `test_hard_links.py` - FUSE link() not implemented
       - `test_special_files.py` - FUSE mknod() not implemented
-      - `test_branch_modes.py` - RO/NC modes not enforced
       - `test_existing_path_policies.py` - Runtime policy switching not implemented
       - `test_moveonenospc.py` - Timeout issues with large file operations
     - Issues: 3 test files with stability problems:
@@ -321,10 +320,11 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
      - Create policies can be changed at runtime
      - `tests/test_runtime_config.py` now passing (9/12 tests pass)
    
-   - **Implement branch mode enforcement** (RO/NC)
-     - Branch modes parsed but not enforced in FUSE operations
-     - Need to check branch mode in create/write operations
-     - Unskip `tests/test_branch_modes.py` when complete
+   - ✅ **Branch mode enforcement COMPLETED** (RO/NC)
+     - Branch modes parsed from command line (/path=RO or /path=NC)
+     - Enforced at policy level for create operations
+     - Write operations correctly allow NC branches
+     - `tests/test_branch_modes.py` enabled (5/9 tests passing)
    
    - **Enable runtime policy switching**
      - Policies are static after mount
