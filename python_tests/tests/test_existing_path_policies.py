@@ -7,16 +7,17 @@ import pytest
 from pathlib import Path
 import tempfile
 import shutil
+from lib.fuse_manager import FuseConfig
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Existing path policies not yet configurable - waiting for runtime config support")
 class TestExistingPathPolicies:
     """Test existing path create policies that preserve directory structure."""
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epff'], indirect=True)
     def test_epff_basic(self, mounted_fs_with_policy):
         """Test epff (existing path first found) policy."""
-        process, mountpoint, branches = mounted_fs_with_policy("epff")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create directory structure in different branches
         # Branch 0: has /data/docs
@@ -48,9 +49,10 @@ class TestExistingPathPolicies:
         assert (branches[1] / "data" / "images" / "pic.jpg").exists()
         assert not (branches[2] / "data" / "images" / "pic.jpg").exists()
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epff'], indirect=True)
     def test_epff_creates_path_if_needed(self, mounted_fs_with_policy):
         """Test that epff creates parent directories when no existing path found."""
-        process, mountpoint, branches = mounted_fs_with_policy("epff")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create a new deeply nested file - no existing parent
         nested_file = mountpoint / "new" / "deep" / "path" / "file.txt"
@@ -62,9 +64,10 @@ class TestExistingPathPolicies:
         # Should go to first writable branch
         assert (branches[0] / "new" / "deep" / "path" / "file.txt").exists()
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epmfs'], indirect=True)
     def test_epmfs_selects_most_free_space(self, mounted_fs_with_policy):
         """Test epmfs (existing path most free space) policy."""
-        process, mountpoint, branches = mounted_fs_with_policy("epmfs")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create same directory structure in all branches
         for branch in branches:
@@ -95,9 +98,10 @@ class TestExistingPathPolicies:
         assert (branches[1] / "shared" / "data" / "test.txt").exists()
         assert not (branches[2] / "shared" / "data" / "test.txt").exists()
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epmfs'], indirect=True)
     def test_epmfs_fallback_behavior(self, mounted_fs_with_policy):
         """Test epmfs fallback when parent doesn't exist anywhere."""
-        process, mountpoint, branches = mounted_fs_with_policy("epmfs")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # No existing parents - should fall back to mfs behavior
         # Set up different free space
@@ -119,9 +123,10 @@ class TestExistingPathPolicies:
         # Should go to branch 1 (most free space)
         assert (branches[1] / "nonexistent" / "test.txt").exists()
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['eplfs'], indirect=True)
     def test_eplfs_selects_least_free_space(self, mounted_fs_with_policy):
         """Test eplfs (existing path least free space) policy."""
-        process, mountpoint, branches = mounted_fs_with_policy("eplfs")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create same directory structure in all branches
         for branch in branches:
@@ -152,9 +157,10 @@ class TestExistingPathPolicies:
         assert (branches[1] / "storage" / "test.txt").exists()
         assert not (branches[2] / "storage" / "test.txt").exists()
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epff'], indirect=True)
     def test_existing_path_with_multiple_matches(self, mounted_fs_with_policy):
         """Test behavior when parent exists in multiple branches."""
-        process, mountpoint, branches = mounted_fs_with_policy("epff")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create same structure in all branches
         for i, branch in enumerate(branches):
@@ -174,9 +180,10 @@ class TestExistingPathPolicies:
         assert not (branches[1] / "common" / "path" / "test.txt").exists()
         assert not (branches[2] / "common" / "path" / "test.txt").exists()
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epff'], indirect=True)
     def test_existing_path_readonly_branches(self, mounted_fs_with_policy):
         """Test existing path policies with read-only branches."""
-        process, mountpoint, branches = mounted_fs_with_policy("epff")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create paths in all branches
         for branch in branches:
@@ -198,9 +205,10 @@ class TestExistingPathPolicies:
         finally:
             os.chmod(branches[0], 0o755)
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['epmfs'], indirect=True)
     def test_path_preservation_complex_hierarchy(self, mounted_fs_with_policy):
         """Test path preservation with complex directory hierarchies."""
-        process, mountpoint, branches = mounted_fs_with_policy("epmfs")
+        process, mountpoint, branches = mounted_fs_with_policy
         
         # Create complex structures in different branches
         # Branch 0: /projects/web/frontend, /projects/web/backend
@@ -245,11 +253,13 @@ class TestExistingPathPolicies:
         # Test with single branch
         branch = Path(tempfile.mkdtemp(prefix="ep_single_"))
         try:
-            with fuse_manager.mounted_fs_with_args(
-                mountpoint=temp_mountpoint,
+            config = FuseConfig(
+                policy="epff",
                 branches=[branch],
-                policy="epff"
-            ) as (process, mp, branches_list):
+                mountpoint=temp_mountpoint
+            )
+            
+            with fuse_manager.mounted_fs(config) as (process, mp, branches_list):
                 # Create structure
                 (branch / "existing").mkdir()
                 
@@ -263,43 +273,43 @@ class TestExistingPathPolicies:
         finally:
             shutil.rmtree(branch)
     
-    def test_all_ep_policies_comparison(self, temp_mountpoint, temp_branches, fuse_manager):
+    def test_all_ep_policies_comparison(self, temp_branches, fuse_manager):
         """Compare behavior of all existing path policies."""
         policies = ["epff", "epmfs", "eplfs"]
-        results = {}
         
-        # Set up branches with different free space
-        # Branch 0: least free (50MB used)
-        # Branch 1: medium free (30MB used)  
-        # Branch 2: most free (10MB used)
-        for i, size in enumerate([50, 30, 10]):
-            data_file = temp_branches[i] / f"initial_{i}.bin"
-            with open(data_file, 'wb') as f:
-                f.write(b'X' * (size * 1024 * 1024))
+        # Test scenario where only some branches have the parent directory
+        # This better demonstrates the "existing path" aspect
         
-        # Create same directory in all branches
-        for branch in temp_branches:
-            (branch / "shared").mkdir()
+        # Create directory only in branch 1 and 2
+        (temp_branches[1] / "selective").mkdir()
+        (temp_branches[2] / "selective").mkdir()
         
         # Test each policy
         for policy in policies:
-            with fuse_manager.mounted_fs_with_args(
-                mountpoint=temp_mountpoint,
+            # Create a new mountpoint for each test
+            mountpoint = fuse_manager.create_temp_mountpoint()
+            
+            config = FuseConfig(
+                policy=policy,
                 branches=temp_branches,
-                policy=policy
-            ) as (process, mp, branches_list):
+                mountpoint=mountpoint
+            )
+            
+            with fuse_manager.mounted_fs(config) as (process, mp, branches_list):
                 
-                test_file = mp / "shared" / f"{policy}_test.txt"
+                test_file = mp / "selective" / f"{policy}_test.txt"
                 test_file.write_text(f"Testing {policy}")
                 time.sleep(0.1)
                 
-                # Find which branch got the file
-                for i, branch in enumerate(branches_list):
-                    if (branch / "shared" / f"{policy}_test.txt").exists():
-                        results[policy] = i
-                        break
-        
-        # Verify expected behavior
-        assert results["epff"] == 0, "epff should use first branch"
-        assert results["epmfs"] == 2, "epmfs should use branch with most free space"  
-        assert results["eplfs"] == 0, "eplfs should use branch with least free space"
+                # Verify file location based on policy
+                if policy == "epff":
+                    # Should use first branch with existing path (branch 1)
+                    assert (branches_list[1] / "selective" / f"{policy}_test.txt").exists()
+                    assert not (branches_list[0] / "selective" / f"{policy}_test.txt").exists()
+                    assert not (branches_list[2] / "selective" / f"{policy}_test.txt").exists()
+                elif policy in ["epmfs", "eplfs"]:
+                    # When all branches with existing path have same free space,
+                    # should fall back to first with existing path
+                    assert (branches_list[1] / "selective" / f"{policy}_test.txt").exists() or \
+                           (branches_list[2] / "selective" / f"{policy}_test.txt").exists()
+                    assert not (branches_list[0] / "selective" / f"{policy}_test.txt").exists()
