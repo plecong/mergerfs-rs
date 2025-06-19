@@ -15,9 +15,25 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 - **FUSE Operations**: 24 of 40+ implemented (60%)
 - **Policies**: 11 of 36 implemented (31%)
-- **Special Features**: 5 of 10+ implemented (50%)
-- **Test Coverage**: 194 tests passing (174 Rust + 20 Python)
-- **Known Limitations**: Concurrent operations limited by FUSE protocol
+- **Special Features**: 3 of 10+ fully implemented (30%)
+- **Test Coverage**: 
+  - Rust tests: 174 passing
+  - Python tests: 
+    - Passing: ~120 tests across action policies, MFS, rename, search, etc.
+    - Skipped: 6 test files (~60 tests) due to missing features:
+      - `test_hard_links.py` - FUSE link() not implemented
+      - `test_special_files.py` - FUSE mknod() not implemented
+      - `test_runtime_config.py` - Control file xattr interface not working
+      - `test_branch_modes.py` - RO/NC modes not enforced
+      - `test_existing_path_policies.py` - Runtime policy switching not implemented
+      - `test_moveonenospc.py` - Timeout issues with large file operations
+    - Issues: 3 test files with stability problems:
+      - `test_file_handles_property.py` - Property test timeouts
+      - `test_property_based.py` - Flaky property tests
+      - Some search policy tests fail on symlink operations
+- **Known Limitations**: 
+  - Concurrent operations limited by FUSE protocol
+  - Several features partially implemented but not fully working
 
 ## Implementation Status by Component
 
@@ -91,17 +107,20 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 ### 🚧 In Progress / High Priority
 
 #### FUSE Operations
-
+- [ ] `link` - Hard link creation (backend implemented, FUSE operation missing)
+- [ ] `mknod` - Special file creation (backend implemented, FUSE operation missing)
 
 **Action Policies**:
 - [ ] `erofs` - Error read-only filesystem (LOW)
 
 #### Special Features
-- [x] Runtime policy configuration via xattr on control file (/.mergerfs)
+- [ ] Runtime policy configuration via xattr on control file (/.mergerfs) - Control file exists but xattr operations not fully implemented
 - [x] Search policy integration into FUSE operations (basic file search)
 - [x] moveonenospc - Move files when out of space (COMPLETED)
 - [x] Path preservation for "existing path" policies (epff implemented)
 - [x] Direct I/O support - cache.files configuration with libfuse/off/partial/full/auto-full/per-process modes
+- [ ] Branch modes (ReadOnly/NoCreate) - Not enforced in FUSE operations
+- [ ] Runtime policy switching - Existing path policies not configurable at runtime
 
 ### ❌ Not Implemented
 
@@ -161,13 +180,14 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 - ✅ Directory operations (create, list, remove)
 - ✅ Metadata operations (chmod, chown, timestamps)
 - ✅ Policy testing (all implemented policies)
-- ✅ Branch management (readonly, readwrite)
+- ⚠️ Branch management (tests skipped - RO/NC modes not enforced)
 - ✅ Extended attributes (xattr)
 - ✅ Symbolic links (creation and reading)
 - ✅ Access permission checking
-- ❌ Hard links (backend ready, FUSE operation not implemented)
-- ❌ Special files (backend ready, FUSE operation not implemented)
-- ✅ Runtime configuration (via xattr)
+- ❌ Hard links (tests skipped - FUSE link() operation not implemented)
+- ❌ Special files (tests skipped - FUSE mknod() operation not implemented)
+- ⚠️ Runtime configuration (control file exists but xattr config not working)
+- ⚠️ Existing path policies (tests skipped - runtime switching not implemented)
 - ✅ Trace-based timing (eliminates flaky tests, 78% faster execution)
 
 ## Known Issues
@@ -176,8 +196,19 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 2. **Error Aggregation**: Simple error handling compared to C++ version
 3. **Memory Usage**: No memory pooling or optimization
 4. **Compatibility**: Some edge cases may differ from C++ mergerfs
-5. **Missing FUSE Operations**: `link` and `mknod` operations not implemented in FUSE layer despite backend support
-6. **Test Failures**: Python tests for hard links and special files fail due to missing FUSE operations
+5. **Missing FUSE Operations**: 
+   - `link` operation not implemented (causes hard link test failures)
+   - `mknod` operation not implemented (causes special file test failures)
+6. **Incomplete Features**:
+   - Branch modes (RO/NC) not enforced in FUSE operations
+   - Runtime policy configuration via .mergerfs control file not working
+   - Existing path policies not switchable at runtime
+7. **Test Failures**: 
+   - Hard link tests fail with "Operation not permitted"
+   - Special file tests fail with "Function not implemented"
+   - Runtime config tests fail - control file xattr operations not working
+   - Branch mode tests skipped - modes not enforced
+   - Existing path policy tests skipped - runtime switching not available
 
 ## Development Guidelines
 
@@ -274,13 +305,50 @@ mergerfs-rs aims to be a complete, compatible implementation of mergerfs in Rust
 
 ## Next Steps
 
-1. Implement remaining existing path create policies (eprand, eplus, eppfrd)
-2. Implement most shared path policies (msp* variants)
-3. Add ftruncate operation support
-4. Implement file locking (lock, flock)
-5. Add performance optimizations (caching, readdir_plus)
+1. **High Priority (Fix Test Failures)**:
+   - **Implement FUSE `link` operation** for hard link support
+     - Backend implementation exists in `src/hard_link_ops.rs`
+     - Need to add `link` handler in `src/fuse_fs.rs`
+     - Unskip `tests/test_hard_links.py` when complete
+   
+   - **Implement FUSE `mknod` operation** for special file support
+     - Backend implementation exists in `src/special_files.rs`
+     - Need to add `mknod` handler in `src/fuse_fs.rs`
+     - Unskip `tests/test_special_files.py` when complete
+   
+   - **Complete runtime configuration** via .mergerfs control file
+     - Control file exists but xattr get/set operations return errors
+     - Need to implement special handling for control file xattr operations
+     - Unskip `tests/test_runtime_config.py` when complete
+   
+   - **Implement branch mode enforcement** (RO/NC)
+     - Branch modes parsed but not enforced in FUSE operations
+     - Need to check branch mode in create/write operations
+     - Unskip `tests/test_branch_modes.py` when complete
+   
+   - **Enable runtime policy switching**
+     - Policies are static after mount
+     - Need to allow policy changes via xattr on control file
+     - Unskip `tests/test_existing_path_policies.py` when complete
+
+2. **Test Infrastructure Issues**:
+   - Fix timeout issues in `test_moveonenospc.py` (large file operations)
+   - Fix timeout issues in `test_file_handles_property.py` (hypothesis tests)
+   - Fix flaky property-based tests in `test_property_based.py`
+
+3. **Medium Priority (Feature Completion)**:
+   - Implement remaining existing path create policies (eprand, eplus, eppfrd)
+   - Implement most shared path policies (msp* variants)
+   - Add ftruncate operation support
+   - Implement file locking (lock, flock)
+
+4. **Low Priority (Performance)**:
+   - Add performance optimizations (caching, readdir_plus)
+   - Implement memory pooling
+   - Add advanced I/O operations (copy_file_range)
 
 ---
 
 *Last Updated: January 2025*
-*Total Progress: ~43% of full mergerfs functionality*
+*Total Progress: ~40% of full mergerfs functionality*
+*Note: Several features are partially implemented but require completion for full compatibility*
