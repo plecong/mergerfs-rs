@@ -18,6 +18,7 @@ const ENOENT: i32 = 2;
 const EIO: i32 = 5;
 const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
+const EXDEV: i32 = 18;
 const ENOTDIR: i32 = 20;
 const EINVAL: i32 = 22;
 const EROFS: i32 = 30;
@@ -183,6 +184,37 @@ impl MergerFS {
 
     pub fn create_file_attr(&self, path: &Path) -> Option<FileAttr> {
         self.create_file_attr_with_branch(path).map(|(attr, _, _)| attr)
+    }
+    
+    /// Find a valid path for an inode, handling hard links where cached path might not exist
+    fn find_valid_path_for_inode(&self, inode_data: &InodeData) -> Option<PathBuf> {
+        // First try the cached path
+        let cached_path = Path::new(&inode_data.path);
+        if self.file_manager.find_first_branch(cached_path).is_ok() {
+            return Some(cached_path.to_path_buf());
+        }
+        
+        // Cached path doesn't work, try to find any file with the same underlying inode
+        if let Some(branch_idx) = &inode_data.branch_idx {
+            let branch = &self.file_manager.branches[*branch_idx];
+            // Look for files in this branch with the same original inode
+            if let Ok(entries) = std::fs::read_dir(&branch.path) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            if metadata.ino() == inode_data.original_ino {
+                                let file_name = entry.file_name();
+                                return Some(PathBuf::from("/").join(file_name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
     }
     
     pub fn create_file_attr_with_branch(&self, path: &Path) -> Option<(FileAttr, usize, u64)> {
@@ -451,8 +483,9 @@ impl Filesystem for MergerFS {
         match self.get_inode_data(ino) {
             Some(data) => {
                 // Refresh attributes from filesystem to get current nlink count
-                let path = Path::new(&data.path);
-                if let Some(fresh_attr) = self.create_file_attr(path) {
+                // For hard links, find a valid path since cached path might not exist
+                if let Some(valid_path) = self.find_valid_path_for_inode(&data) {
+                    if let Some(fresh_attr) = self.create_file_attr(&valid_path) {
                     // The fresh_attr should have the same calculated inode
                     // Verify consistency - if not, use the cached inode
                     let updated_attr = if fresh_attr.ino != ino {
@@ -471,10 +504,15 @@ impl Filesystem for MergerFS {
                     
                     tracing::info!("Returning fresh attr for inode {}: size={}, nlink={}, path={}", 
                                   ino, updated_attr.size, updated_attr.nlink, data.path);
-                    reply.attr(&TTL, &updated_attr);
+                        reply.attr(&TTL, &updated_attr);
+                    } else {
+                        // If we can't refresh, return cached data
+                        tracing::warn!("Could not refresh attributes for valid path, returning cached");
+                        reply.attr(&TTL, &data.attr);
+                    }
                 } else {
-                    // If we can't refresh, return cached data
-                    tracing::warn!("Could not refresh attributes for {}, returning cached", data.path);
+                    // No valid path found, return cached data
+                    tracing::warn!("No valid path found for inode {}, returning cached data", ino);
                     reply.attr(&TTL, &data.attr);
                 }
             },
@@ -489,31 +527,33 @@ impl Filesystem for MergerFS {
         match self.get_inode_data(ino) {
             Some(data) => {
                 if data.attr.kind == FileType::RegularFile {
-                    let path = Path::new(&data.path);
-                    
-                    // Find which branch has the file using search policy
-                    let branch_idx = match self.file_manager.find_first_branch(path) {
-                        Ok(branch) => {
-                            // Find the index of this branch
-                            self.file_manager.branches.iter().position(|b| Arc::ptr_eq(b, &branch))
+                    // For hard links, find a valid path since cached path might not exist
+                    if let Some(path) = self.find_valid_path_for_inode(&data) {
+                        // Find which branch has the file
+                        let branch_idx = match self.file_manager.find_first_branch(&path) {
+                            Ok(branch) => {
+                                self.file_manager.branches.iter().position(|b| Arc::ptr_eq(b, &branch))
+                            }
+                            Err(_) => None,
+                        };
+                        // Determine if we should use direct I/O
+                        let direct_io = self.config.read().should_use_direct_io();
+                        
+                        // Create file handle with the valid path
+                        let fh = self.file_handle_manager.create_handle(ino, path, flags, branch_idx, direct_io);
+                        
+                        // Set reply flags based on direct I/O setting
+                        let mut reply_flags = flags as u32;
+                        if direct_io {
+                            // Set FOPEN_DIRECT_IO flag in the reply
+                            reply_flags |= 0x00000001; // FOPEN_DIRECT_IO
                         }
-                        Err(_) => None, // File doesn't exist in any branch
-                    };
-                    
-                    // Determine if we should use direct I/O
-                    let direct_io = self.config.read().should_use_direct_io();
-                    
-                    // Create file handle
-                    let fh = self.file_handle_manager.create_handle(ino, PathBuf::from(&data.path), flags, branch_idx, direct_io);
-                    
-                    // Set reply flags based on direct I/O setting
-                    let mut reply_flags = flags as u32;
-                    if direct_io {
-                        // Set FOPEN_DIRECT_IO flag in the reply
-                        reply_flags |= 0x00000001; // FOPEN_DIRECT_IO
+                        
+                        reply.opened(fh, reply_flags);
+                    } else {
+                        tracing::error!("Could not find valid path for inode {}", ino);
+                        reply.error(ENOENT);
                     }
-                    
-                    reply.opened(fh, reply_flags);
                 } else {
                     // Not a regular file
                     reply.error(EINVAL);
@@ -1119,10 +1159,8 @@ impl Filesystem for MergerFS {
         match self.file_manager.remove_file(path) {
             Ok(_) => {
                 tracing::info!("File unlinked successfully: {:?}", file_path);
-                // Remove from inode cache if present
-                if let Some(ino) = self.path_to_inode(&file_path) {
-                    self.remove_inode(ino);
-                }
+                // Don't remove inodes on unlink - let them be garbage collected naturally
+                // The filesystem handles hard link reference counting
                 reply.ok();
             }
             Err(e) => {
@@ -1870,6 +1908,7 @@ impl Filesystem for MergerFS {
                             std::io::ErrorKind::PermissionDenied => reply.error(EACCES),
                             std::io::ErrorKind::NotFound => reply.error(ENOENT),
                             std::io::ErrorKind::AlreadyExists => reply.error(EEXIST),
+                            std::io::ErrorKind::CrossesDevices => reply.error(EXDEV),
                             _ => reply.error(EIO),
                         }
                     }

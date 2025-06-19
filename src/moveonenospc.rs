@@ -175,7 +175,7 @@ impl MoveOnENOSPCHandler {
             const O_APPEND: i32 = 1024;
             
             let new_file = OpenOptions::new()
-                .read(clean_flags & O_RDONLY == O_RDONLY || clean_flags & O_RDWR == O_RDWR)
+                .read(clean_flags & O_RDWR == O_RDWR || (clean_flags & (O_WRONLY | O_RDWR)) == 0)
                 .write(clean_flags & O_WRONLY == O_WRONLY || clean_flags & O_RDWR == O_RDWR)
                 .append(clean_flags & O_APPEND != 0)
                 .open(&dst_path)?;

@@ -74,29 +74,41 @@ class TestHardLinks:
         link_stat = (branches[0] / "samebranch_link.txt").stat()
         assert orig_stat.st_ino == link_stat.st_ino
     
-    def test_hard_link_cross_branch_error(self, mounted_fs):
-        """Test hard link across branches (should fail with EXDEV)."""
-        if len(mounted_fs) == 4:
-            process, mountpoint, branches, _ = mounted_fs
-        else:
-            process, mountpoint, branches = mounted_fs
+    def test_hard_link_cross_branch_error(self, fuse_manager, temp_branches, temp_mountpoint):
+        """Test hard link across branches (should fail with EXDEV with path-preserving policy)."""
+        from lib.fuse_manager import FuseConfig
         
-        # Create files in different branches
-        (branches[0] / "file_branch0.txt").write_text("Branch 0")
-        (branches[1] / "file_branch1.txt").write_text("Branch 1")
+        # Use a path-preserving policy
+        config = FuseConfig(
+            policy="epff",  # existing path first found - path preserving
+            branches=temp_branches,
+            mountpoint=temp_mountpoint
+        )
         
-        time.sleep(0.1)
-        
-        # Try to create hard link across branches
-        # This should fail with EXDEV (cross-device link)
-        with pytest.raises(OSError) as exc_info:
-            os.link(
-                mountpoint / "file_branch0.txt",
-                mountpoint / "subdir" / "cross_link.txt"  # Would go to different branch
-            )
-        
-        # Should get EXDEV error
-        assert exc_info.value.errno == 18  # EXDEV
+        with fuse_manager.mounted_fs(config) as mounted:
+            if len(mounted) == 4:
+                process, mountpoint, branches, _ = mounted
+            else:
+                process, mountpoint, branches = mounted
+            
+            # Create a file in branch0
+            (branches[0] / "file.txt").write_text("Content")
+            
+            # Create a directory in branch1 only
+            (branches[1] / "subdir").mkdir()
+            
+            time.sleep(0.1)
+            
+            # Try to create hard link in subdir (which only exists in branch1)
+            # With path-preserving policy, this should fail with EXDEV
+            with pytest.raises(OSError) as exc_info:
+                os.link(
+                    mountpoint / "file.txt",
+                    mountpoint / "subdir" / "link.txt"
+                )
+            
+            # Should get EXDEV error because target dir doesn't exist on same branch
+            assert exc_info.value.errno == 18  # EXDEV
     
     def test_hard_link_to_directory_error(self, mounted_fs):
         """Test hard link to directory (should fail)."""
@@ -117,9 +129,13 @@ class TestHardLinks:
         # Should fail with EPERM or EISDIR
         assert exc_info.value.errno in [1, 21]  # EPERM or EISDIR
     
+    @pytest.mark.parametrize('mounted_fs_with_policy', ['mfs'], indirect=True)
     def test_hard_link_with_policies(self, mounted_fs_with_policy):
         """Test hard link behavior with different create policies."""
-        process, mountpoint, branches = mounted_fs_with_policy("mfs")
+        if len(mounted_fs_with_policy) == 4:
+            process, mountpoint, branches, _ = mounted_fs_with_policy
+        else:
+            process, mountpoint, branches = mounted_fs_with_policy
         
         # Add different amounts of data to branches
         (branches[0] / "data0.bin").write_bytes(b'0' * (30 * 1024 * 1024))
@@ -128,12 +144,12 @@ class TestHardLinks:
         
         time.sleep(0.2)
         
-        # Create file - should go to branch 1 (most free space)
+        # Create file - should go to branch 2 (most free space: 500MB - 20MB = 480MB)
         original = mountpoint / "policy_test.txt"
         original.write_text("Policy test content")
         time.sleep(0.1)
         
-        assert (branches[1] / "policy_test.txt").exists()
+        assert (branches[2] / "policy_test.txt").exists()
         
         # Create hard link - must be in same branch
         link = mountpoint / "policy_link.txt"
@@ -141,9 +157,9 @@ class TestHardLinks:
         time.sleep(0.1)
         
         # Link should be in same branch as original
-        assert (branches[1] / "policy_link.txt").exists()
+        assert (branches[2] / "policy_link.txt").exists()
         assert not (branches[0] / "policy_link.txt").exists()
-        assert not (branches[2] / "policy_link.txt").exists()
+        assert not (branches[1] / "policy_link.txt").exists()
     
     def test_hard_link_unlink_behavior(self, mounted_fs):
         """Test unlinking hard links."""
