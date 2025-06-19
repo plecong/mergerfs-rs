@@ -56,12 +56,17 @@ class FuseConfig:
     branches: List[Path] = None
     mountpoint: Path = None
     readonly_branches: List[int] = None  # Indices of readonly branches
+    nocreate_branches: List[int] = None  # Indices of no-create branches
     timeout: float = 10.0
     enable_trace: bool = False  # Enable trace monitoring
     
     def __post_init__(self):
         if self.branches is None:
             self.branches = []
+        if self.readonly_branches is None:
+            self.readonly_branches = []
+        if self.nocreate_branches is None:
+            self.nocreate_branches = []
 
 
 class FuseManager:
@@ -154,9 +159,15 @@ class FuseManager:
         if config.policy != "ff":
             cmd.extend(["-o", f"func.create={config.policy}"])
             
-        # Add mountpoint and branches
+        # Add mountpoint and branches with modes
         cmd.append(str(config.mountpoint))
-        cmd.extend([str(branch) for branch in config.branches])
+        for i, branch in enumerate(config.branches):
+            branch_spec = str(branch)
+            if i in config.readonly_branches:
+                branch_spec += "=RO"
+            elif i in config.nocreate_branches:
+                branch_spec += "=NC"
+            cmd.append(branch_spec)
         
         print(f"Mounting FUSE: {' '.join(cmd)}")
         

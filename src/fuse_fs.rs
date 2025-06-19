@@ -954,7 +954,7 @@ impl Filesystem for MergerFS {
         let result = if let Some(branch_idx) = branch_idx {
                 if branch_idx < self.file_manager.branches.len() {
                     let branch = &self.file_manager.branches[branch_idx];
-                    if branch.allows_create() {
+                    if !branch.is_readonly() {
                         let full_path = branch.full_path(path);
                         
                         // Write directly to the specific branch

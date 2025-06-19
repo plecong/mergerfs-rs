@@ -11,7 +11,6 @@ from lib.fuse_manager import FuseManager, FuseConfig
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Branch modes (RO/NC) not yet implemented - waiting for branch mode support")
 class TestBranchModes:
     """Test different branch access modes."""
     
@@ -28,20 +27,14 @@ class TestBranchModes:
         (rw_branch / "shared.txt").write_text("RW shared")
         
         try:
-            # Mount with one RO branch
-            # Format: branch_path:mode
-            branches_spec = [
-                str(rw_branch),
-                f"{ro_branch}:RO"  # or "=RO" depending on implementation
-            ]
-            
-            # Note: Current implementation might not support mode suffixes
-            # Would need to be implemented in the Rust code
-            with fuse_manager.mounted_fs_with_args(
+            config = FuseConfig(
+                branches=[rw_branch, ro_branch],
                 mountpoint=temp_mountpoint,
-                branches=[rw_branch, ro_branch],  # For now, use regular mount
+                readonly_branches=[1],  # Second branch is read-only
                 policy="ff"
-            ) as (process, mp, branches_list):
+            )
+            
+            with fuse_manager.mounted_fs(config) as (process, mp, branches_list):
                 
                 # Can read files from RO branch
                 assert (mp / "ro_file.txt").read_text() == "RO content"
@@ -76,12 +69,14 @@ class TestBranchModes:
         (nc_branch / "subdir" / "existing.txt").write_text("Existing in NC")
         
         try:
-            # Note: NC mode would need to be implemented
-            with fuse_manager.mounted_fs_with_args(
-                mountpoint=temp_mountpoint,
+            config = FuseConfig(
                 branches=[normal_branch, nc_branch],
+                mountpoint=temp_mountpoint,
+                nocreate_branches=[1],  # Second branch is no-create
                 policy="ff"
-            ) as (process, mp, branches_list):
+            )
+            
+            with fuse_manager.mounted_fs(config) as (process, mp, branches_list):
                 
                 # Can read from NC branch
                 assert (mp / "nocreate.txt").read_text() == "NC branch"
@@ -116,12 +111,15 @@ class TestBranchModes:
             (branch / f"file_{mode.lower()}.txt").write_text(f"{mode} content")
         
         try:
-            # Mount with mixed modes
-            with fuse_manager.mounted_fs_with_args(
-                mountpoint=temp_mountpoint,
+            config = FuseConfig(
                 branches=branches,
+                mountpoint=temp_mountpoint,
+                readonly_branches=[1],  # RO branch
+                nocreate_branches=[2],  # NC branch
                 policy="ff"
-            ) as (process, mp, branches_list):
+            )
+            
+            with fuse_manager.mounted_fs(config) as (process, mp, branches_list):
                 
                 # Test file creation with different policies
                 test_files = [
@@ -193,11 +191,13 @@ class TestBranchModes:
         
         try:
             # Test with MFS policy
-            with fuse_manager.mounted_fs_with_args(
-                mountpoint=temp_mountpoint,
+            config = FuseConfig(
                 branches=branches,
+                mountpoint=temp_mountpoint,
                 policy="mfs"
-            ) as (process, mp, branches_list):
+            )
+            
+            with fuse_manager.mounted_fs(config) as (process, mp, branches_list):
                 
                 # Should select branch 1 (least used = most free)
                 (mp / "mfs_test.txt").write_text("MFS test")

@@ -54,7 +54,7 @@ use policy::{
     }
 };
 
-fn parse_args(args: &[String]) -> (String, PathBuf, Vec<PathBuf>) {
+fn parse_args(args: &[String]) -> (String, PathBuf, Vec<(PathBuf, BranchMode)>) {
     let mut create_policy = "ff".to_string();
     let mut i = 1;
     
@@ -78,9 +78,42 @@ fn parse_args(args: &[String]) -> (String, PathBuf, Vec<PathBuf>) {
     }
     
     let mountpoint = PathBuf::from(&args[i]);
-    let branch_paths: Vec<PathBuf> = args[i + 1..].iter().map(PathBuf::from).collect();
+    let branch_specs: Vec<(PathBuf, BranchMode)> = args[i + 1..]
+        .iter()
+        .map(|arg| parse_branch_spec(arg))
+        .collect();
     
-    (create_policy, mountpoint, branch_paths)
+    (create_policy, mountpoint, branch_specs)
+}
+
+fn parse_branch_spec(spec: &str) -> (PathBuf, BranchMode) {
+    // Check for mode suffix using '=' separator
+    if let Some(eq_pos) = spec.find('=') {
+        let path = &spec[..eq_pos];
+        let mode_part = &spec[eq_pos + 1..];
+        
+        // Parse mode (may include minfreespace after comma)
+        let mode_str = if let Some(comma_pos) = mode_part.find(',') {
+            &mode_part[..comma_pos]
+        } else {
+            mode_part
+        };
+        
+        let mode = match mode_str.to_uppercase().as_str() {
+            "RO" => BranchMode::ReadOnly,
+            "NC" => BranchMode::NoCreate,
+            "RW" => BranchMode::ReadWrite,
+            _ => {
+                eprintln!("Warning: Unknown branch mode '{}', defaulting to RW", mode_str);
+                BranchMode::ReadWrite
+            }
+        };
+        
+        (PathBuf::from(path), mode)
+    } else {
+        // No mode specified, default to RW
+        (PathBuf::from(spec), BranchMode::ReadWrite)
+    }
 }
 
 fn main() {
@@ -137,16 +170,16 @@ fn main() {
     }
 
     // Parse command line arguments
-    let (create_policy, mountpoint, branch_paths) = parse_args(&args);
+    let (create_policy, mountpoint, branch_specs) = parse_args(&args);
     
     let mut branches = Vec::new();
-    for branch_path in branch_paths.iter() {
+    for (branch_path, mode) in branch_specs.iter() {
         if !branch_path.exists() {
             eprintln!("Error: Branch directory {} does not exist", branch_path.display());
             std::process::exit(1);
         }
         
-        let branch = Arc::new(Branch::new(branch_path.clone(), BranchMode::ReadWrite));
+        let branch = Arc::new(Branch::new(branch_path.clone(), *mode));
         branches.push(branch);
     }
     
@@ -168,16 +201,19 @@ fn main() {
         _ => ("FirstFound", Box::new(FirstFoundCreatePolicy::new())),
     };
     
-    let file_manager = FileManager::new(branches, policy);
-    let fs = MergerFS::new(file_manager);
-    
     // Log mount information
+    let branch_info: Vec<String> = branches.iter()
+        .map(|b| format!("{}={:?}", b.path.display(), b.mode))
+        .collect();
     tracing::info!(
         mountpoint = %mountpoint.display(),
-        branches = ?branch_paths,
+        branches = ?branch_info,
         policy = %create_policy,
         "Starting mergerfs-rs mount"
     );
+    
+    let file_manager = FileManager::new(branches, policy);
+    let fs = MergerFS::new(file_manager);
     
     // Mount the filesystem
     let options = vec![
